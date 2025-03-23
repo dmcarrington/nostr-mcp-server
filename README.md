@@ -2,7 +2,7 @@
 
 A Model Context Protocol (MCP) server that provides Nostr capabilities to LLMs like Claude.
 
-https://github.com/user-attachments/assets/3a3534aa-6b3f-4f1f-930a-220c95ece597
+https://github.com/user-attachments/assets/1d2d47d0-c61b-44e2-85be-5985d2a81c64
 
 ## Features
 
