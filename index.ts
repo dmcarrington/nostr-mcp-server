@@ -5,6 +5,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import WebSocket from "ws";
 import { SimplePool } from "nostr-tools/pool";
+import { decode } from "light-bolt11-decoder";
 
 // Type definitions for Nostr
 interface NostrEvent {
@@ -41,6 +42,38 @@ interface NostrProfile {
   [k: string]: unknown;
 }
 
+// Zap-specific interfaces based on NIP-57
+interface ZapRequest {
+  kind: 9734;
+  content: string;
+  tags: string[][];
+  pubkey: string;
+  id: string;
+  sig: string;
+  created_at: number;
+}
+
+interface ZapReceipt {
+  kind: 9735;
+  content: string;
+  tags: string[][];
+  pubkey: string;
+  id: string;
+  sig: string;
+  created_at: number;
+}
+
+interface ZapRequestData {
+  pubkey: string;
+  content: string;
+  created_at: number;
+  id: string;
+  amount?: number;
+  relays?: string[];
+  event?: string;
+  lnurl?: string;
+}
+
 // Set global WebSocket implementation for Node.js
 (globalThis as any).WebSocket = WebSocket;
 
@@ -48,6 +81,7 @@ interface NostrProfile {
 const KINDS = {
   Metadata: 0,
   Text: 1,
+  ZapRequest: 9734,
   ZapReceipt: 9735
 };
 
@@ -110,41 +144,145 @@ function formatNote(note: NostrEvent): string {
   ].join("\n");
 }
 
-// Helper function to format zap receipt
+// Parse zap request data from description tag in zap receipt
+function parseZapRequestData(zapReceipt: NostrEvent): ZapRequestData | undefined {
+  try {
+    // Find the description tag which contains the zap request JSON
+    const descriptionTag = zapReceipt.tags.find(tag => tag[0] === "description" && tag.length > 1);
+    
+    if (!descriptionTag || !descriptionTag[1]) {
+      return undefined;
+    }
+    
+    // Parse the zap request JSON
+    const zapRequestData: ZapRequestData = JSON.parse(descriptionTag[1]);
+    
+    return zapRequestData;
+  } catch (error) {
+    console.error("Error parsing zap request data:", error);
+    return undefined;
+  }
+}
+
+// Helper function to extract and decode bolt11 invoice from a zap receipt
+function decodeBolt11FromZap(zapReceipt: NostrEvent): any | undefined {
+  try {
+    // Find the bolt11 tag
+    const bolt11Tag = zapReceipt.tags.find(tag => tag[0] === "bolt11" && tag.length > 1);
+    
+    if (!bolt11Tag || !bolt11Tag[1]) {
+      return undefined;
+    }
+    
+    // Decode the bolt11 invoice
+    const decodedInvoice = decode(bolt11Tag[1]);
+    
+    return decodedInvoice;
+  } catch (error) {
+    console.error("Error decoding bolt11 invoice:", error);
+    return undefined;
+  }
+}
+
+// Extract amount in sats from decoded bolt11 invoice
+function getAmountFromDecodedInvoice(decodedInvoice: any): number | undefined {
+  try {
+    if (!decodedInvoice || !decodedInvoice.sections) {
+      return undefined;
+    }
+    
+    // Find the amount section
+    const amountSection = decodedInvoice.sections.find((section: any) => section.name === "amount");
+    
+    if (!amountSection) {
+      return undefined;
+    }
+    
+    // Convert msats to sats
+    const amountMsats = amountSection.value;
+    const amountSats = Math.floor(amountMsats / 1000);
+    
+    return amountSats;
+  } catch (error) {
+    console.error("Error extracting amount from decoded invoice:", error);
+    return undefined;
+  }
+}
+
+// Helper function to format zap receipt with enhanced information
 function formatZapReceipt(zap: NostrEvent): string {
   if (!zap) return "";
   
   try {
-    // Extract amount from the zap
-    const zapRequest = zap.tags.find((tag: string[]) => tag[0] === "description");
-    let description: any = {};
-    let amount = "Unknown";
-
-    if (zapRequest && zapRequest[1]) {
-      try {
-        description = JSON.parse(zapRequest[1]);
-        const bolt11Tag = zap.tags.find((tag: string[]) => tag[0] === "bolt11");
-        if (bolt11Tag && bolt11Tag[1] && description.amount) {
-          // For simplicity, we're extracting from the description, but in real implementation
-          // you'd want to decode the bolt11 invoice
-          amount = `${description.amount / 1000} sats`;
-        }
-      } catch(e) {
-        console.error("Error parsing zap description", e);
-      }
-    }
-    
+    // Get basic zap info
     const created = new Date(zap.created_at * 1000).toLocaleString();
     const sender = zap.pubkey.slice(0, 8) + "..." + zap.pubkey.slice(-8);
     
-    return [
+    // Parse the zap request data from description tag
+    const zapRequestData = parseZapRequestData(zap);
+    
+    // Decode the bolt11 invoice
+    const decodedInvoice = decodeBolt11FromZap(zap);
+    
+    // Get amount from either the decoded invoice or the zap request data
+    let amount: string = "Unknown";
+    let amountSats: number | undefined;
+    
+    if (decodedInvoice) {
+      amountSats = getAmountFromDecodedInvoice(decodedInvoice);
+      if (amountSats !== undefined) {
+        amount = `${amountSats} sats`;
+      }
+    } else if (zapRequestData?.amount) {
+      amountSats = Math.floor(zapRequestData.amount / 1000);
+      amount = `${amountSats} sats`;
+    }
+    
+    // Get the comment if available
+    let comment = zapRequestData?.content || "No comment";
+    
+    // Check if this zap is for a specific event
+    let zapTarget = "User";
+    let eventId = "";
+    
+    // Look for an e tag in the zap receipt
+    const eventTag = zap.tags.find(tag => tag[0] === "e" && tag.length > 1);
+    if (eventTag && eventTag[1]) {
+      zapTarget = "Event";
+      eventId = eventTag[1];
+    } else if (zapRequestData?.event) {
+      zapTarget = "Event";
+      eventId = zapRequestData.event;
+    }
+    
+    // Format the output with all available information
+    const lines = [
       `From: ${sender}`,
       `Amount: ${amount}`,
       `Created: ${created}`,
-      `---`,
-    ].join("\n");
+      `Target: ${zapTarget}${eventId ? ` (${eventId.slice(0, 8)}...)` : ''}`,
+      `Comment: ${comment}`,
+    ];
+    
+    // Add payment preimage if available
+    const preimageTag = zap.tags.find(tag => tag[0] === "preimage" && tag.length > 1);
+    if (preimageTag && preimageTag[1]) {
+      lines.push(`Preimage: ${preimageTag[1].slice(0, 10)}...`);
+    }
+    
+    // Add payment hash if available in bolt11 invoice
+    if (decodedInvoice) {
+      const paymentHashSection = decodedInvoice.sections.find((section: any) => section.name === "payment_hash");
+      if (paymentHashSection) {
+        lines.push(`Payment Hash: ${paymentHashSection.value.slice(0, 10)}...`);
+      }
+    }
+    
+    lines.push('---');
+    
+    return lines.join("\n");
   } catch (error) {
-    console.error("Error formatting zap receipt", error);
+    console.error("Error formatting zap receipt:", error);
     return "Error formatting zap receipt";
   }
 }

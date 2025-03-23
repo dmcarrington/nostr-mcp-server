@@ -10,7 +10,7 @@ This server implements three tools for interacting with the Nostr network:
 
 1. `getProfile`: Fetches a user's profile information by public key
 2. `getKind1Notes`: Fetches text notes (kind 1) authored by a user
-3. `getReceivedZaps`: Fetches zaps received by a user
+3. `getReceivedZaps`: Fetches zaps received by a user, including detailed payment information
 
 ## Installation
 
@@ -89,6 +89,7 @@ You can also specify the number of notes or zaps to fetch:
 
 ## Implementation Details
 
+- Enhanced zap receipt parsing includes detailed information from bolt11 invoices
 - Each tool call creates a fresh connection to the relays, ensuring reliable data retrieval
 - The server automatically closes connections after each query is completed
 - Connections are properly managed to prevent memory leaks
@@ -112,6 +113,6 @@ The server uses the following relays by default:
 
 To modify or extend this server:
 
-1. Edit the `src/index.ts` file
+1. Edit the `index.ts` file in the project root
 2. Run `npm run build` to compile
 3. Restart Claude for Desktop to pick up your changes 
