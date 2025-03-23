@@ -14,6 +14,8 @@ This server implements five tools for interacting with the Nostr network:
 4. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
 5. `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
 
+All tools fully support both hex public keys and npub format, with user-friendly display of Nostr identifiers.
+
 ## Installation
 
 ```bash
@@ -73,7 +75,7 @@ Once configured, you can ask Claude to use the Nostr tools by making requests li
 - "Show me the zaps sent by npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "Show me all zaps (both sent and received) for npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 
-Claude will convert npub addresses to hex public keys automatically.
+The server automatically handles conversion between npub and hex formats, so you can use either format in your queries. Results are displayed with user-friendly npub identifiers.
 
 ## Advanced Usage
 
@@ -92,11 +94,12 @@ For zap queries, you can enable extra validation and debugging:
 ## Limitations
 
 - The server has a default 8-second timeout for queries to prevent hanging
-- Only public keys in hex format are supported in the API (though Claude can convert npubs)
+- Only public keys in hex format or npub format are supported
 - Only a subset of relays is used by default
 
 ## Implementation Details
 
+- Native support for npub format using NIP-19 encoding/decoding
 - NIP-57 compliant zap receipt detection with direction-awareness (sent/received/self)
 - Advanced bolt11 invoice parsing with payment amount extraction
 - Smart caching system for improved performance with large volumes of zaps

@@ -6,6 +6,133 @@ import { z } from "zod";
 import WebSocket from "ws";
 import { SimplePool } from "nostr-tools/pool";
 import { decode } from "light-bolt11-decoder";
+import * as nip19 from "nostr-tools/nip19";
+
+// Helper function to convert npub to hex
+function npubToHex(pubkey: string): string | null {
+  if (!pubkey) return null;
+  
+  try {
+    // Clean up input
+    pubkey = pubkey.trim();
+    
+    // Check if the input is already a hex key (case insensitive check, but return lowercase)
+    if (/^[0-9a-fA-F]{64}$/i.test(pubkey)) {
+      return pubkey.toLowerCase();
+    }
+    
+    // Check if the input is an npub
+    if (pubkey.startsWith('npub1')) {
+      try {
+        const { type, data } = nip19.decode(pubkey);
+        if (type === 'npub') {
+          return data as string;
+        }
+      } catch (decodeError) {
+        console.error("Error decoding npub:", decodeError);
+        return null;
+      }
+    }
+    
+    // Not a valid pubkey format
+    return null;
+  } catch (error) {
+    console.error("Error converting npub to hex:", error);
+    return null;
+  }
+}
+
+// Helper function to convert hex to npub
+function hexToNpub(hex: string): string | null {
+  if (!hex) return null;
+  
+  try {
+    // Clean up input
+    hex = hex.trim();
+    
+    // Check if the input is already an npub
+    if (hex.startsWith('npub1')) {
+      // Validate that it's a proper npub by trying to decode it
+      try {
+        const { type } = nip19.decode(hex);
+        if (type === 'npub') {
+          return hex;
+        }
+      } catch (e) {
+        // Not a valid npub
+        return null;
+      }
+    }
+    
+    // Check if the input is a valid hex key (case insensitive, but convert to lowercase)
+    if (/^[0-9a-fA-F]{64}$/i.test(hex)) {
+      try {
+        return nip19.npubEncode(hex.toLowerCase());
+      } catch (encodeError) {
+        console.error("Error encoding hex to npub:", encodeError);
+        return null;
+      }
+    }
+    
+    // Not a valid hex key
+    return null;
+  } catch (error) {
+    console.error("Error converting hex to npub:", error);
+    return null;
+  }
+}
+
+// Helper function to format public key for display
+function formatPubkey(pubkey: string, useShortFormat = false): string {
+  if (!pubkey) return "Unknown";
+  
+  try {
+    // Clean up input
+    pubkey = pubkey.trim();
+    
+    // Get npub representation if we have a hex key
+    let npub: string | null = null;
+    
+    if (pubkey.startsWith('npub1')) {
+      // Validate that it's a proper npub
+      try {
+        const { type } = nip19.decode(pubkey);
+        if (type === 'npub') {
+          npub = pubkey;
+        }
+      } catch (e) {
+        // Not a valid npub, fall back to original
+        return pubkey;
+      }
+    } else if (/^[0-9a-fA-F]{64}$/i.test(pubkey)) {
+      // Convert hex to npub
+      npub = hexToNpub(pubkey);
+    }
+    
+    // If we couldn't get a valid npub, return the original
+    if (!npub) {
+      return pubkey;
+    }
+    
+    // Format according to preference
+    if (useShortFormat) {
+      // Short format: npub1abc...xyz
+      return `${npub.slice(0, 8)}...${npub.slice(-4)}`;
+    } else {
+      // Full format: npub1abc...xyz (hex)
+      const hex = npubToHex(npub);
+      if (hex) {
+        return `${npub} (${hex.slice(0, 6)}...${hex.slice(-6)})`;
+      } else {
+        return npub;
+      }
+    }
+  } catch (error) {
+    // Return original on error
+    console.error("Error formatting pubkey:", error);
+    return pubkey;
+  }
+}
 
 // Type definitions for Nostr
 interface NostrEvent {
@@ -513,22 +640,29 @@ function formatZapReceipt(zap: NostrEvent, pubkeyContext?: string): string {
     
     // Get sender information from P tag or description
     let sender = "Unknown";
+    let senderPubkey: string | undefined;
     const senderPTag = zapReceipt.tags.find(tag => tag[0] === 'P' && tag.length > 1);
     if (senderPTag && senderPTag[1]) {
-      sender = `${senderPTag[1].slice(0, 8)}...${senderPTag[1].slice(-8)}`;
+      senderPubkey = senderPTag[1];
+      const npub = hexToNpub(senderPubkey);
+      sender = npub ? `${npub.slice(0, 8)}...${npub.slice(-4)}` : `${senderPubkey.slice(0, 8)}...${senderPubkey.slice(-8)}`;
     } else {
       // Try to get from description
-    const zapRequestData = parseZapRequestData(zapReceipt);
+      const zapRequestData = parseZapRequestData(zapReceipt);
       if (zapRequestData?.pubkey) {
-        sender = `${zapRequestData.pubkey.slice(0, 8)}...${zapRequestData.pubkey.slice(-8)}`;
+        senderPubkey = zapRequestData.pubkey;
+        const npub = hexToNpub(senderPubkey);
+        sender = npub ? `${npub.slice(0, 8)}...${npub.slice(-4)}` : `${senderPubkey.slice(0, 8)}...${senderPubkey.slice(-8)}`;
       }
     }
     
     // Get recipient information
     const recipient = zapReceipt.tags.find(tag => tag[0] === 'p' && tag.length > 1)?.[1];
-    const formattedRecipient = recipient ? 
-      `${recipient.slice(0, 8)}...${recipient.slice(-8)}` : 
-      "Unknown";
+    let formattedRecipient = "Unknown";
+    if (recipient) {
+      const npub = hexToNpub(recipient);
+      formattedRecipient = npub ? `${npub.slice(0, 8)}...${npub.slice(-4)}` : `${recipient.slice(0, 8)}...${recipient.slice(-8)}`;
+    }
     
     // Get amount
     let amount: string = enrichedZap.amountSats !== undefined ? 
@@ -604,16 +738,32 @@ server.tool(
   "getProfile",
   "Get a Nostr profile by public key",
   {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
     relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
   },
   async ({ pubkey, relays }) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
     const relaysToUse = relays || DEFAULT_RELAYS;
     // Create a fresh pool for this request
     const pool = getFreshPool();
     
     try {
-      console.error(`Fetching profile for ${pubkey} from ${relaysToUse.join(", ")}`);
+      console.error(`Fetching profile for ${hexPubkey} from ${relaysToUse.join(", ")}`);
       
       // Create a timeout promise
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -625,7 +775,7 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.Metadata],
-          authors: [pubkey],
+          authors: [hexPubkey],
         } as NostrFilter
       );
       
@@ -637,7 +787,7 @@ server.tool(
           content: [
             {
               type: "text",
-              text: "No profile found for this public key",
+              text: `No profile found for ${displayPubkey}`,
             },
           ],
         };
@@ -649,7 +799,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: formatted,
+            text: `Profile for ${displayPubkey}:\n\n${formatted}`,
           },
         ],
       };
@@ -660,7 +810,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Error fetching profile: ${error instanceof Error ? error.message : "Unknown error"}`,
+            text: `Error fetching profile for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         ],
       };
@@ -675,17 +825,33 @@ server.tool(
   "getKind1Notes",
   "Get text notes (kind 1) by public key",
   {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
     limit: z.number().min(1).max(100).default(10).describe("Maximum number of notes to fetch"),
     relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
   },
   async ({ pubkey, limit, relays }) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
     const relaysToUse = relays || DEFAULT_RELAYS;
     // Create a fresh pool for this request
     const pool = getFreshPool();
     
     try {
-      console.error(`Fetching kind 1 notes for ${pubkey} from ${relaysToUse.join(", ")}`);
+      console.error(`Fetching kind 1 notes for ${hexPubkey} from ${relaysToUse.join(", ")}`);
       
       // Use the querySync method with a timeout
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -696,7 +862,7 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.Text],
-          authors: [pubkey],
+          authors: [hexPubkey],
           limit,
         } as NostrFilter
       );
@@ -708,7 +874,7 @@ server.tool(
           content: [
             {
               type: "text",
-              text: "No notes found for this public key",
+              text: `No notes found for ${displayPubkey}`,
             },
           ],
         };
@@ -723,7 +889,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Found ${notes.length} notes from ${pubkey}:\n\n${formattedNotes}`,
+            text: `Found ${notes.length} notes from ${displayPubkey}:\n\n${formattedNotes}`,
           },
         ],
       };
@@ -734,7 +900,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Error fetching notes: ${error instanceof Error ? error.message : "Unknown error"}`,
+            text: `Error fetching notes for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         ],
       };
@@ -749,19 +915,35 @@ server.tool(
   "getReceivedZaps",
   "Get zaps received by a public key",
   {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
     limit: z.number().min(1).max(100).default(10).describe("Maximum number of zaps to fetch"),
     relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
     validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
     debug: z.boolean().default(false).describe("Enable verbose debug logging"),
   },
   async ({ pubkey, limit, relays, validateReceipts, debug }) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
     const relaysToUse = relays || DEFAULT_RELAYS;
     // Create a fresh pool for this request
     const pool = getFreshPool();
     
     try {
-      console.error(`Fetching zaps for ${pubkey} from ${relaysToUse.join(", ")}`);
+      console.error(`Fetching zaps for ${hexPubkey} from ${relaysToUse.join(", ")}`);
       
       // Use the querySync method with a timeout
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -773,7 +955,7 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.ZapReceipt],
-          "#p": [pubkey], // lowercase 'p' for recipient
+          "#p": [hexPubkey], // lowercase 'p' for recipient
           limit: Math.ceil(limit * 1.5), // Fetch a bit more to account for potential invalid zaps
         } as NostrFilter
       );
@@ -785,7 +967,7 @@ server.tool(
           content: [
             {
               type: "text",
-              text: "No zaps found for this public key",
+              text: `No zaps found for ${displayPubkey}`,
             },
           ],
         };
@@ -802,7 +984,7 @@ server.tool(
       for (const zap of zaps) {
         try {
           // Process the zap receipt with context of the target pubkey
-          const processedZap = processZapReceipt(zap as ZapReceipt, pubkey);
+          const processedZap = processZapReceipt(zap as ZapReceipt, hexPubkey);
           
           // Skip zaps that aren't actually received by this pubkey
           if (processedZap.direction !== 'received' && processedZap.direction !== 'self') {
@@ -833,7 +1015,7 @@ server.tool(
       }
       
       if (processedZaps.length === 0) {
-        let message = "No valid zaps found for this public key";
+        let message = `No valid zaps found for ${displayPubkey}`;
         if (invalidCount > 0) {
           message += ` (${invalidCount} invalid zaps were filtered out)`;
         }
@@ -857,13 +1039,13 @@ server.tool(
       // Calculate total sats received
       const totalSats = processedZaps.reduce((sum, zap) => sum + (zap.amountSats || 0), 0);
       
-      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, pubkey)).join("\n");
+      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, hexPubkey)).join("\n");
       
       return {
         content: [
           {
             type: "text",
-            text: `Found ${processedZaps.length} zaps received by ${pubkey}.\nTotal received: ${totalSats} sats\n\n${formattedZaps}`,
+            text: `Found ${processedZaps.length} zaps received by ${displayPubkey}.\nTotal received: ${totalSats} sats\n\n${formattedZaps}`,
           },
         ],
       };
@@ -874,7 +1056,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Error fetching zaps: ${error instanceof Error ? error.message : "Unknown error"}`,
+            text: `Error fetching zaps for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         ],
       };
@@ -889,19 +1071,35 @@ server.tool(
   "getSentZaps",
   "Get zaps sent by a public key",
   {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
     limit: z.number().min(1).max(100).default(10).describe("Maximum number of zaps to fetch"),
     relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
     validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
     debug: z.boolean().default(false).describe("Enable verbose debug logging"),
   },
   async ({ pubkey, limit, relays, validateReceipts, debug }) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
     const relaysToUse = relays || DEFAULT_RELAYS;
     // Create a fresh pool for this request
     const pool = getFreshPool();
     
     try {
-      console.error(`Fetching sent zaps for ${pubkey} from ${relaysToUse.join(", ")}`);
+      console.error(`Fetching sent zaps for ${hexPubkey} from ${relaysToUse.join(", ")}`);
       
       // Use the querySync method with a timeout
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -914,7 +1112,7 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.ZapReceipt],
-          "#P": [pubkey], // uppercase 'P' for sender
+          "#P": [hexPubkey], // uppercase 'P' for sender
           limit: Math.ceil(limit * 1.5), // Fetch a bit more to account for potential invalid zaps
         } as NostrFilter
       );
@@ -976,7 +1174,7 @@ server.tool(
       for (const zap of potentialSentZaps) {
         try {
           // Process the zap receipt with context of the target pubkey
-          const processedZap = processZapReceipt(zap as ZapReceipt, pubkey);
+          const processedZap = processZapReceipt(zap as ZapReceipt, hexPubkey);
           
           // Skip zaps that aren't sent by this pubkey
           if (processedZap.direction !== 'sent' && processedZap.direction !== 'self') {
@@ -1013,7 +1211,7 @@ server.tool(
       processedZaps = Array.from(uniqueZaps.values());
       
       if (processedZaps.length === 0) {
-        let message = "No zaps sent by this public key were found.";
+        let message = `No zaps sent by ${displayPubkey} were found.`;
         if (invalidCount > 0 || nonSentCount > 0) {
           message += ` (${invalidCount} invalid zaps and ${nonSentCount} non-sent zaps were filtered out)`;
         }
@@ -1044,13 +1242,13 @@ server.tool(
         console.error("Sample sent zap:", JSON.stringify(firstZap, null, 2));
       }
       
-      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, pubkey)).join("\n");
+      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, hexPubkey)).join("\n");
       
       return {
         content: [
           {
             type: "text",
-            text: `Found ${processedZaps.length} zaps sent by ${pubkey}.\nTotal sent: ${totalSats} sats\n\n${formattedZaps}`,
+            text: `Found ${processedZaps.length} zaps sent by ${displayPubkey}.\nTotal sent: ${totalSats} sats\n\n${formattedZaps}`,
           },
         ],
       };
@@ -1061,7 +1259,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Error fetching sent zaps: ${error instanceof Error ? error.message : "Unknown error"}`,
+            text: `Error fetching sent zaps for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         ],
       };
@@ -1076,19 +1274,35 @@ server.tool(
   "getAllZaps",
   "Get all zaps (sent and received) for a public key",
   {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
     limit: z.number().min(1).max(100).default(20).describe("Maximum number of total zaps to fetch"),
     relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
     validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
     debug: z.boolean().default(false).describe("Enable verbose debug logging"),
   },
   async ({ pubkey, limit, relays, validateReceipts, debug }) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
     const relaysToUse = relays || DEFAULT_RELAYS;
     // Create a fresh pool for this request
     const pool = getFreshPool();
     
     try {
-      console.error(`Fetching all zaps for ${pubkey} from ${relaysToUse.join(", ")}`);
+      console.error(`Fetching all zaps for ${hexPubkey} from ${relaysToUse.join(", ")}`);
       
       // Use a more efficient approach: fetch all potentially relevant zaps in parallel
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -1102,7 +1316,7 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.ZapReceipt],
-          "#p": [pubkey],
+          "#p": [hexPubkey],
             limit: Math.ceil(limit * 1.5),
         } as NostrFilter
         ),
@@ -1112,7 +1326,7 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.ZapReceipt],
-          "#P": [pubkey],
+          "#P": [hexPubkey],
             limit: Math.ceil(limit * 1.5),
         } as NostrFilter
         )
@@ -1156,7 +1370,7 @@ server.tool(
           content: [
             {
               type: "text",
-              text: "No zaps found for this public key. Try specifying different relays that might have the data.",
+              text: `No zaps found for ${displayPubkey}. Try specifying different relays that might have the data.`,
             },
           ],
         };
@@ -1183,7 +1397,7 @@ server.tool(
       for (const zap of uniqueZaps) {
         try {
           // Process the zap with the target pubkey as context
-          const processedZap = processZapReceipt(zap as ZapReceipt, pubkey);
+          const processedZap = processZapReceipt(zap as ZapReceipt, hexPubkey);
           
           // Skip zaps that are neither sent nor received by this pubkey
           if (processedZap.direction === 'unknown') {
@@ -1215,7 +1429,7 @@ server.tool(
       }
       
       if (processedZaps.length === 0) {
-        let message = "No relevant zaps found for this public key.";
+        let message = `No relevant zaps found for ${displayPubkey}.`;
         if (invalidCount > 0 || irrelevantCount > 0) {
           message += ` (${invalidCount} invalid zaps and ${irrelevantCount} irrelevant zaps were filtered out)`;
         }
@@ -1247,11 +1461,11 @@ server.tool(
       processedZaps = processedZaps.slice(0, limit);
       
       // Format the zaps with the pubkey context
-      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, pubkey)).join("\n");
+      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, hexPubkey)).join("\n");
       
       // Prepare summary statistics
       const summary = [
-        `Zap Summary for ${pubkey}:`,
+        `Zap Summary for ${displayPubkey}:`,
         `- ${sentZaps.length} zaps sent (${totalSent} sats)`,
         `- ${receivedZaps.length} zaps received (${totalReceived} sats)`,
         `- ${selfZaps.length} self-zaps (${totalSelfZaps} sats)`,
@@ -1274,7 +1488,7 @@ server.tool(
         content: [
           {
             type: "text",
-            text: `Error fetching all zaps: ${error instanceof Error ? error.message : "Unknown error"}`,
+            text: `Error fetching all zaps for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
           },
         ],
       };
