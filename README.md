@@ -2,6 +2,8 @@
 
 A Model Context Protocol (MCP) server that provides Nostr capabilities to LLMs like Claude.
 
+https://github.com/user-attachments/assets/3a3534aa-6b3f-4f1f-930a-220c95ece597
+
 ## Features
 
 This server implements three tools for interacting with the Nostr network:
