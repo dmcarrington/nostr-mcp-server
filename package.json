@@ -1,0 +1,39 @@
+{
+  "name": "nostr-mcp-server",
+  "version": "1.0.0",
+  "description": "A Model Context Protocol (MCP) server that provides Nostr capabilities to LLMs like Claude",
+  "main": "index.js",
+  "type": "module",
+  "bin": {
+    "nostr-mcp": "./build/index.js"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "build": "tsc && node -e \"require('fs').chmodSync('build/index.js', '755')\"",
+    "start": "node build/index.js"
+  },
+  "files": [
+    "build"
+  ],
+  "keywords": [
+    "nostr",
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "llm"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.7.0",
+    "@nostr-dev-kit/ndk": "^2.13.0-rc2",
+    "nostr-tools": "^2.11.0",
+    "ws": "^8.16.1",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.11",
+    "@types/ws": "^8.5.10",
+    "typescript": "^5.8.2"
+  }
+}
