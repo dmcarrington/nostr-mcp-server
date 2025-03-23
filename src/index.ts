@@ -6,6 +6,41 @@ import { z } from "zod";
 import WebSocket from "ws";
 import { SimplePool } from "nostr-tools/pool";
 
+// Type definitions for Nostr
+interface NostrEvent {
+  id: string;
+  pubkey: string;
+  created_at: number;
+  kind: number;
+  tags: string[][];
+  content: string;
+  sig: string;
+}
+
+interface NostrFilter {
+  ids?: string[];
+  authors?: string[];
+  kinds?: number[];
+  since?: number;
+  until?: number;
+  limit?: number;
+  [key: `#${string}`]: string[];
+}
+
+interface NostrProfile {
+  name?: string;
+  display_name?: string;
+  displayName?: string;
+  about?: string;
+  picture?: string;
+  banner?: string;
+  nip05?: string;
+  lud06?: string;
+  lud16?: string;
+  website?: string;
+  [k: string]: unknown;
+}
+
 // Set global WebSocket implementation for Node.js
 (globalThis as any).WebSocket = WebSocket;
 
@@ -35,15 +70,20 @@ const server = new McpServer({
 const QUERY_TIMEOUT = 8000;
 
 // Helper function to get a fresh pool for each request
-function getFreshPool() {
+function getFreshPool(): SimplePool {
   return new SimplePool();
 }
 
 // Helper function to format profile data
-function formatProfile(profile: any): string {
+function formatProfile(profile: NostrEvent): string {
   if (!profile) return "No profile found";
   
-  const metadata = profile.content ? JSON.parse(profile.content) : {};
+  let metadata: NostrProfile = {};
+  try {
+    metadata = profile.content ? JSON.parse(profile.content) : {};
+  } catch (e) {
+    console.error("Error parsing profile metadata:", e);
+  }
   
   return [
     `Name: ${metadata.name || "Unknown"}`,
@@ -57,7 +97,7 @@ function formatProfile(profile: any): string {
 }
 
 // Helper function to format note content
-function formatNote(note: any): string {
+function formatNote(note: NostrEvent): string {
   if (!note) return "";
   
   const created = new Date(note.created_at * 1000).toLocaleString();
@@ -71,7 +111,7 @@ function formatNote(note: any): string {
 }
 
 // Helper function to format zap receipt
-function formatZapReceipt(zap: any): string {
+function formatZapReceipt(zap: NostrEvent): string {
   if (!zap) return "";
   
   try {
@@ -126,7 +166,7 @@ server.tool(
       console.error(`Fetching profile for ${pubkey} from ${relaysToUse.join(", ")}`);
       
       // Create a timeout promise
-      const timeoutPromise = new Promise((_, reject) => {
+      const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
       });
       
@@ -136,11 +176,11 @@ server.tool(
         {
           kinds: [KINDS.Metadata],
           authors: [pubkey],
-        }
+        } as NostrFilter
       );
       
       // Race the promises
-      const profile = await Promise.race([profilePromise, timeoutPromise]);
+      const profile = await Promise.race([profilePromise, timeoutPromise]) as NostrEvent;
       
       if (!profile) {
         return {
@@ -198,7 +238,7 @@ server.tool(
       console.error(`Fetching kind 1 notes for ${pubkey} from ${relaysToUse.join(", ")}`);
       
       // Use the querySync method with a timeout
-      const timeoutPromise = new Promise((_, reject) => {
+      const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
       });
       
@@ -208,10 +248,10 @@ server.tool(
           kinds: [KINDS.Text],
           authors: [pubkey],
           limit,
-        }
+        } as NostrFilter
       );
       
-      const notes = await Promise.race([notesPromise, timeoutPromise]) as any[];
+      const notes = await Promise.race([notesPromise, timeoutPromise]) as NostrEvent[];
       
       if (!notes || notes.length === 0) {
         return {
@@ -272,7 +312,7 @@ server.tool(
       console.error(`Fetching zaps for ${pubkey} from ${relaysToUse.join(", ")}`);
       
       // Use the querySync method with a timeout
-      const timeoutPromise = new Promise((_, reject) => {
+      const timeoutPromise = new Promise<never>((_, reject) => {
         setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
       });
       
@@ -282,10 +322,10 @@ server.tool(
           kinds: [KINDS.ZapReceipt],
           "#p": [pubkey],
           limit,
-        }
+        } as NostrFilter
       );
       
-      const zaps = await Promise.race([zapsPromise, timeoutPromise]) as any[];
+      const zaps = await Promise.race([zapsPromise, timeoutPromise]) as NostrEvent[];
       
       if (!zaps || zaps.length === 0) {
         return {
