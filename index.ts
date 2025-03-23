@@ -74,7 +74,104 @@ interface ZapRequestData {
   lnurl?: string;
 }
 
-// Set global WebSocket implementation for Node.js
+// Define a zap direction type for better code clarity
+type ZapDirection = 'sent' | 'received' | 'self' | 'unknown';
+
+// Define a cached zap type that includes direction
+interface CachedZap extends ZapReceipt {
+  direction?: ZapDirection;
+  amountSats?: number;
+  targetPubkey?: string;
+  targetEvent?: string;
+  targetCoordinate?: string;
+  processedAt: number;
+}
+
+// Simple cache implementation for zap receipts
+class ZapCache {
+  private cache: Map<string, CachedZap> = new Map();
+  private maxSize: number;
+  private ttlMs: number;
+  
+  constructor(maxSize = 1000, ttlMinutes = 10) {
+    this.maxSize = maxSize;
+    this.ttlMs = ttlMinutes * 60 * 1000;
+  }
+  
+  add(zapReceipt: ZapReceipt, enrichedData?: Partial<CachedZap>): CachedZap {
+    // Create enriched zap with processing timestamp
+    const cachedZap: CachedZap = {
+      ...zapReceipt,
+      ...enrichedData,
+      processedAt: Date.now()
+    };
+    
+    // Add to cache
+    this.cache.set(zapReceipt.id, cachedZap);
+    
+    // Clean cache if it exceeds max size
+    if (this.cache.size > this.maxSize) {
+      this.cleanup();
+    }
+    
+    return cachedZap;
+  }
+  
+  get(id: string): CachedZap | undefined {
+    const cachedZap = this.cache.get(id);
+    
+    // Return undefined if not found or expired
+    if (!cachedZap || Date.now() - cachedZap.processedAt > this.ttlMs) {
+      if (cachedZap) {
+        // Remove expired entry
+        this.cache.delete(id);
+      }
+      return undefined;
+    }
+    
+    return cachedZap;
+  }
+  
+  has(id: string): boolean {
+    return this.get(id) !== undefined;
+  }
+  
+  cleanup(): void {
+    const now = Date.now();
+    
+    // Remove expired entries
+    for (const [id, zap] of this.cache.entries()) {
+      if (now - zap.processedAt > this.ttlMs) {
+        this.cache.delete(id);
+      }
+    }
+    
+    // If still too large, remove oldest entries
+    if (this.cache.size > this.maxSize) {
+      const sortedEntries = Array.from(this.cache.entries())
+        .sort((a, b) => a[1].processedAt - b[1].processedAt);
+      
+      const entriesToRemove = sortedEntries.slice(0, sortedEntries.length - Math.floor(this.maxSize * 0.75));
+      
+      for (const [id] of entriesToRemove) {
+        this.cache.delete(id);
+      }
+    }
+  }
+  
+  clear(): void {
+    this.cache.clear();
+  }
+  
+  size(): number {
+    return this.cache.size;
+  }
+}
+
+// Create a global cache instance
+const zapCache = new ZapCache();
+
+// Set WebSocket implementation for Node.js
 (globalThis as any).WebSocket = WebSocket;
 
 // Define event kinds
@@ -89,6 +186,7 @@ const KINDS = {
 const DEFAULT_RELAYS = [
   "wss://relay.damus.io",
   "wss://relay.nostr.band",
+  "wss://relay.primal.net",
   "wss://nos.lol",
   "wss://relay.current.fyi",
   "wss://nostr.bitcoiner.social"
@@ -154,8 +252,29 @@ function parseZapRequestData(zapReceipt: NostrEvent): ZapRequestData | undefined
       return undefined;
     }
     
-    // Parse the zap request JSON
-    const zapRequestData: ZapRequestData = JSON.parse(descriptionTag[1]);
+    // Parse the zap request JSON - this contains a serialized ZapRequest
+    const zapRequest: ZapRequest = JSON.parse(descriptionTag[1]);
+    
+    // Convert to the ZapRequestData format
+    const zapRequestData: ZapRequestData = {
+      pubkey: zapRequest.pubkey,
+      content: zapRequest.content,
+      created_at: zapRequest.created_at,
+      id: zapRequest.id,
+    };
+    
+    // Extract additional data from ZapRequest tags
+    zapRequest.tags.forEach(tag => {
+      if (tag[0] === 'amount' && tag[1]) {
+        zapRequestData.amount = parseInt(tag[1], 10);
+      } else if (tag[0] === 'relays' && tag.length > 1) {
+        zapRequestData.relays = tag.slice(1);
+      } else if (tag[0] === 'e' && tag[1]) {
+        zapRequestData.event = tag[1];
+      } else if (tag[0] === 'lnurl' && tag[1]) {
+        zapRequestData.lnurl = tag[1];
+      }
+    });
     
     return zapRequestData;
   } catch (error) {
@@ -209,73 +328,266 @@ function getAmountFromDecodedInvoice(decodedInvoice: any): number | undefined {
   }
 }
 
+// Validate a zap receipt according to NIP-57 Appendix F
+function validateZapReceipt(zapReceipt: NostrEvent, zapRequest?: ZapRequest): { valid: boolean, reason?: string } {
+  try {
+    // 1. Must be kind 9735
+    if (zapReceipt.kind !== KINDS.ZapReceipt) {
+      return { valid: false, reason: "Not a zap receipt (kind 9735)" };
+    }
+    
+    // 2. Must have a bolt11 tag
+    const bolt11Tag = zapReceipt.tags.find(tag => tag[0] === "bolt11" && tag.length > 1);
+    if (!bolt11Tag || !bolt11Tag[1]) {
+      return { valid: false, reason: "Missing bolt11 tag" };
+    }
+    
+    // 3. Must have a description tag with the zap request
+    const descriptionTag = zapReceipt.tags.find(tag => tag[0] === "description" && tag.length > 1);
+    if (!descriptionTag || !descriptionTag[1]) {
+      return { valid: false, reason: "Missing description tag" };
+    }
+    
+    // 4. Parse the zap request from the description tag if not provided
+    let parsedZapRequest: ZapRequest;
+    try {
+      parsedZapRequest = zapRequest || JSON.parse(descriptionTag[1]);
+    } catch (e) {
+      return { valid: false, reason: "Invalid zap request JSON in description tag" };
+    }
+    
+    // 5. Validate the zap request structure
+    if (parsedZapRequest.kind !== KINDS.ZapRequest) {
+      return { valid: false, reason: "Invalid zap request kind" };
+    }
+    
+    // 6. Check that the p tag from the zap request is included in the zap receipt
+    const requestedRecipientPubkey = parsedZapRequest.tags.find(tag => tag[0] === 'p' && tag.length > 1)?.[1];
+    const receiptRecipientTag = zapReceipt.tags.find(tag => tag[0] === 'p' && tag.length > 1);
+    
+    if (!requestedRecipientPubkey || !receiptRecipientTag || receiptRecipientTag[1] !== requestedRecipientPubkey) {
+      return { valid: false, reason: "Recipient pubkey mismatch" };
+    }
+    
+    // 7. Check for optional e tag consistency if present in the zap request
+    const requestEventTag = parsedZapRequest.tags.find(tag => tag[0] === 'e' && tag.length > 1);
+    if (requestEventTag) {
+      const receiptEventTag = zapReceipt.tags.find(tag => tag[0] === 'e' && tag.length > 1);
+      if (!receiptEventTag || receiptEventTag[1] !== requestEventTag[1]) {
+        return { valid: false, reason: "Event ID mismatch" };
+      }
+    }
+    
+    // 8. Check for optional amount consistency
+    const amountTag = parsedZapRequest.tags.find(tag => tag[0] === 'amount' && tag.length > 1);
+    if (amountTag) {
+      // Decode the bolt11 invoice to verify the amount
+      const decodedInvoice = decodeBolt11FromZap(zapReceipt);
+      if (decodedInvoice) {
+        const invoiceAmountMsats = decodedInvoice.sections.find((s: any) => s.name === "amount")?.value;
+        const requestAmountMsats = parseInt(amountTag[1], 10);
+        
+        if (invoiceAmountMsats && Math.abs(invoiceAmountMsats - requestAmountMsats) > 10) { // Allow small rounding differences
+          return { valid: false, reason: "Amount mismatch between request and invoice" };
+        }
+      }
+    }
+    
+    return { valid: true };
+  } catch (error) {
+    return { valid: false, reason: `Validation error: ${error instanceof Error ? error.message : String(error)}` };
+  }
+}
+
+// Determine the direction of a zap relative to a pubkey
+function determineZapDirection(zapReceipt: ZapReceipt, pubkey: string): ZapDirection {
+  try {
+    // Check if received via lowercase 'p' tag (recipient)
+    const isReceived = zapReceipt.tags.some(tag => tag[0] === 'p' && tag[1] === pubkey);
+    
+    // Check if sent via uppercase 'P' tag (sender, per NIP-57)
+    let isSent = zapReceipt.tags.some(tag => tag[0] === 'P' && tag[1] === pubkey);
+    
+    if (!isSent) {
+      // Fallback: check description tag for the sender pubkey
+      const descriptionTag = zapReceipt.tags.find(tag => tag[0] === "description" && tag.length > 1);
+      if (descriptionTag && descriptionTag[1]) {
+        try {
+          const zapRequest: ZapRequest = JSON.parse(descriptionTag[1]);
+          isSent = zapRequest && zapRequest.pubkey === pubkey;
+        } catch (e) {
+          // Ignore parsing errors
+        }
+      }
+    }
+    
+    // Determine direction
+    if (isSent && isReceived) {
+      return 'self';
+    } else if (isSent) {
+      return 'sent';
+    } else if (isReceived) {
+      return 'received';
+    } else {
+      return 'unknown';
+    }
+  } catch (error) {
+    console.error("Error determining zap direction:", error);
+    return 'unknown';
+  }
+}
+
+// Process a zap receipt into an enriched cached zap
+function processZapReceipt(zapReceipt: ZapReceipt, pubkey: string): CachedZap {
+  // Check if we already have this zap in the cache
+  const existingCachedZap = zapCache.get(zapReceipt.id);
+  if (existingCachedZap) {
+    return existingCachedZap;
+  }
+  
+  try {
+    // Determine direction relative to the specified pubkey
+    const direction = determineZapDirection(zapReceipt, pubkey);
+    
+    // Extract target pubkey (recipient)
+    const targetPubkey = zapReceipt.tags.find(tag => tag[0] === 'p' && tag.length > 1)?.[1];
+    
+    // Extract target event if any
+    const targetEvent = zapReceipt.tags.find(tag => tag[0] === 'e' && tag.length > 1)?.[1];
+    
+    // Extract target coordinate if any (a tag)
+    const targetCoordinate = zapReceipt.tags.find(tag => tag[0] === 'a' && tag.length > 1)?.[1];
+    
+    // Parse zap request to get additional data
+    const zapRequestData = parseZapRequestData(zapReceipt);
+    
+    // Decode bolt11 invoice to get amount
+    const decodedInvoice = decodeBolt11FromZap(zapReceipt);
+    const amountSats = decodedInvoice ? 
+      getAmountFromDecodedInvoice(decodedInvoice) : 
+      (zapRequestData?.amount ? Math.floor(zapRequestData.amount / 1000) : undefined);
+    
+    // Create enriched zap and add to cache
+    return zapCache.add(zapReceipt, {
+      direction,
+      amountSats,
+      targetPubkey,
+      targetEvent,
+      targetCoordinate
+    });
+  } catch (error) {
+    console.error("Error processing zap receipt:", error);
+    // Still cache the basic zap with unknown direction
+    return zapCache.add(zapReceipt, { direction: 'unknown' });
+  }
+}
+
 // Helper function to format zap receipt with enhanced information
-function formatZapReceipt(zap: NostrEvent): string {
+function formatZapReceipt(zap: NostrEvent, pubkeyContext?: string): string {
   if (!zap) return "";
   
   try {
-    // Get basic zap info
-    const created = new Date(zap.created_at * 1000).toLocaleString();
-    const sender = zap.pubkey.slice(0, 8) + "..." + zap.pubkey.slice(-8);
+    // Cast to ZapReceipt for better type safety since we know we're dealing with kind 9735
+    const zapReceipt = zap as ZapReceipt;
     
-    // Parse the zap request data from description tag
-    const zapRequestData = parseZapRequestData(zap);
-    
-    // Decode the bolt11 invoice
-    const decodedInvoice = decodeBolt11FromZap(zap);
-    
-    // Get amount from either the decoded invoice or the zap request data
-    let amount: string = "Unknown";
-    let amountSats: number | undefined;
-    
-    if (decodedInvoice) {
-      amountSats = getAmountFromDecodedInvoice(decodedInvoice);
-      if (amountSats !== undefined) {
-        amount = `${amountSats} sats`;
+    // Process the zap receipt with context if provided
+    let enrichedZap: CachedZap;
+    if (pubkeyContext) {
+      enrichedZap = processZapReceipt(zapReceipt, pubkeyContext);
+    } else {
+      // Check if it's already in cache
+      const cachedZap = zapCache.get(zapReceipt.id);
+      if (cachedZap) {
+        enrichedZap = cachedZap;
+      } else {
+        // Process without context - won't have direction information
+        enrichedZap = {
+          ...zapReceipt,
+          processedAt: Date.now()
+        };
       }
-    } else if (zapRequestData?.amount) {
-      amountSats = Math.floor(zapRequestData.amount / 1000);
-      amount = `${amountSats} sats`;
     }
     
-    // Get the comment if available
-    let comment = zapRequestData?.content || "No comment";
+    // Get basic zap info
+    const created = new Date(zapReceipt.created_at * 1000).toLocaleString();
     
-    // Check if this zap is for a specific event
+    // Get sender information from P tag or description
+    let sender = "Unknown";
+    const senderPTag = zapReceipt.tags.find(tag => tag[0] === 'P' && tag.length > 1);
+    if (senderPTag && senderPTag[1]) {
+      sender = `${senderPTag[1].slice(0, 8)}...${senderPTag[1].slice(-8)}`;
+    } else {
+      // Try to get from description
+    const zapRequestData = parseZapRequestData(zapReceipt);
+      if (zapRequestData?.pubkey) {
+        sender = `${zapRequestData.pubkey.slice(0, 8)}...${zapRequestData.pubkey.slice(-8)}`;
+      }
+    }
+    
+    // Get recipient information
+    const recipient = zapReceipt.tags.find(tag => tag[0] === 'p' && tag.length > 1)?.[1];
+    const formattedRecipient = recipient ? 
+      `${recipient.slice(0, 8)}...${recipient.slice(-8)}` : 
+      "Unknown";
+    
+    // Get amount
+    let amount: string = enrichedZap.amountSats !== undefined ? 
+      `${enrichedZap.amountSats} sats` : 
+      "Unknown";
+    
+    // Get comment
+    let comment = "No comment";
+    const zapRequestData = parseZapRequestData(zapReceipt);
+    if (zapRequestData?.content) {
+      comment = zapRequestData.content;
+    }
+    
+    // Check if this zap is for a specific event or coordinate
     let zapTarget = "User";
-    let eventId = "";
+    let targetId = "";
     
-    // Look for an e tag in the zap receipt
-    const eventTag = zap.tags.find(tag => tag[0] === "e" && tag.length > 1);
-    if (eventTag && eventTag[1]) {
+    if (enrichedZap.targetEvent) {
       zapTarget = "Event";
-      eventId = eventTag[1];
-    } else if (zapRequestData?.event) {
-      zapTarget = "Event";
-      eventId = zapRequestData.event;
+      targetId = enrichedZap.targetEvent;
+    } else if (enrichedZap.targetCoordinate) {
+      zapTarget = "Replaceable Event";
+      targetId = enrichedZap.targetCoordinate;
     }
     
     // Format the output with all available information
     const lines = [
       `From: ${sender}`,
+      `To: ${formattedRecipient}`,
       `Amount: ${amount}`,
       `Created: ${created}`,
-      `Target: ${zapTarget}${eventId ? ` (${eventId.slice(0, 8)}...)` : ''}`,
+      `Target: ${zapTarget}${targetId ? ` (${targetId.slice(0, 8)}...)` : ''}`,
       `Comment: ${comment}`,
     ];
     
     // Add payment preimage if available
-    const preimageTag = zap.tags.find(tag => tag[0] === "preimage" && tag.length > 1);
+    const preimageTag = zapReceipt.tags.find(tag => tag[0] === "preimage" && tag.length > 1);
     if (preimageTag && preimageTag[1]) {
       lines.push(`Preimage: ${preimageTag[1].slice(0, 10)}...`);
     }
     
     // Add payment hash if available in bolt11 invoice
+    const decodedInvoice = decodeBolt11FromZap(zapReceipt);
     if (decodedInvoice) {
       const paymentHashSection = decodedInvoice.sections.find((section: any) => section.name === "payment_hash");
       if (paymentHashSection) {
         lines.push(`Payment Hash: ${paymentHashSection.value.slice(0, 10)}...`);
       }
+    }
+    
+    // Add direction information if available
+    if (enrichedZap.direction && enrichedZap.direction !== 'unknown') {
+      const directionLabels = {
+        'sent': '↑ SENT',
+        'received': '↓ RECEIVED',
+        'self': '↻ SELF ZAP'
+      };
+      
+      lines.unshift(`[${directionLabels[enrichedZap.direction]}]`);
     }
     
     lines.push('---');
@@ -440,8 +752,10 @@ server.tool(
     pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
     limit: z.number().min(1).max(100).default(10).describe("Maximum number of zaps to fetch"),
     relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
+    validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
+    debug: z.boolean().default(false).describe("Enable verbose debug logging"),
   },
-  async ({ pubkey, limit, relays }) => {
+  async ({ pubkey, limit, relays, validateReceipts, debug }) => {
     const relaysToUse = relays || DEFAULT_RELAYS;
     // Create a fresh pool for this request
     const pool = getFreshPool();
@@ -454,12 +768,13 @@ server.tool(
         setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
       });
       
+      // Use the proper filter with lowercase 'p' tag which indicates recipient
       const zapsPromise = pool.querySync(
         relaysToUse,
         {
           kinds: [KINDS.ZapReceipt],
-          "#p": [pubkey],
-          limit,
+          "#p": [pubkey], // lowercase 'p' for recipient
+          limit: Math.ceil(limit * 1.5), // Fetch a bit more to account for potential invalid zaps
         } as NostrFilter
       );
       
@@ -476,16 +791,79 @@ server.tool(
         };
       }
       
-      // Sort zaps by created_at in descending order (newest first)
-      zaps.sort((a, b) => b.created_at - a.created_at);
+      if (debug) {
+        console.error(`Retrieved ${zaps.length} raw zap receipts`);
+      }
       
-      const formattedZaps = zaps.map(formatZapReceipt).join("\n");
+      // Process and optionally validate zaps
+      let processedZaps: CachedZap[] = [];
+      let invalidCount = 0;
+      
+      for (const zap of zaps) {
+        try {
+          // Process the zap receipt with context of the target pubkey
+          const processedZap = processZapReceipt(zap as ZapReceipt, pubkey);
+          
+          // Skip zaps that aren't actually received by this pubkey
+          if (processedZap.direction !== 'received' && processedZap.direction !== 'self') {
+            if (debug) {
+              console.error(`Skipping zap ${zap.id.slice(0, 8)}... with direction ${processedZap.direction}`);
+            }
+            continue;
+          }
+          
+          // Validate if requested
+          if (validateReceipts) {
+            const validationResult = validateZapReceipt(zap);
+            if (!validationResult.valid) {
+              if (debug) {
+                console.error(`Invalid zap receipt ${zap.id.slice(0, 8)}...: ${validationResult.reason}`);
+              }
+              invalidCount++;
+              continue;
+            }
+          }
+          
+          processedZaps.push(processedZap);
+        } catch (error) {
+          if (debug) {
+            console.error(`Error processing zap ${zap.id.slice(0, 8)}...`, error);
+          }
+        }
+      }
+      
+      if (processedZaps.length === 0) {
+        let message = "No valid zaps found for this public key";
+        if (invalidCount > 0) {
+          message += ` (${invalidCount} invalid zaps were filtered out)`;
+        }
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: message,
+            },
+          ],
+        };
+      }
+      
+      // Sort zaps by created_at in descending order (newest first)
+      processedZaps.sort((a, b) => b.created_at - a.created_at);
+      
+      // Limit to requested number
+      processedZaps = processedZaps.slice(0, limit);
+      
+      // Calculate total sats received
+      const totalSats = processedZaps.reduce((sum, zap) => sum + (zap.amountSats || 0), 0);
+      
+      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, pubkey)).join("\n");
       
       return {
         content: [
           {
             type: "text",
-            text: `Found ${zaps.length} zaps for ${pubkey}:\n\n${formattedZaps}`,
+            text: `Found ${processedZaps.length} zaps received by ${pubkey}.\nTotal received: ${totalSats} sats\n\n${formattedZaps}`,
           },
         ],
       };
@@ -507,6 +885,406 @@ server.tool(
   },
 );
 
+server.tool(
+  "getSentZaps",
+  "Get zaps sent by a public key",
+  {
+    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    limit: z.number().min(1).max(100).default(10).describe("Maximum number of zaps to fetch"),
+    relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
+    validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
+    debug: z.boolean().default(false).describe("Enable verbose debug logging"),
+  },
+  async ({ pubkey, limit, relays, validateReceipts, debug }) => {
+    const relaysToUse = relays || DEFAULT_RELAYS;
+    // Create a fresh pool for this request
+    const pool = getFreshPool();
+    
+    try {
+      console.error(`Fetching sent zaps for ${pubkey} from ${relaysToUse.join(", ")}`);
+      
+      // Use the querySync method with a timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
+      });
+      
+      // First try the direct and correct approach: query with uppercase 'P' tag (NIP-57)
+      if (debug) console.error("Trying direct query with #P tag...");
+      const directSentZapsPromise = pool.querySync(
+        relaysToUse,
+        {
+          kinds: [KINDS.ZapReceipt],
+          "#P": [pubkey], // uppercase 'P' for sender
+          limit: Math.ceil(limit * 1.5), // Fetch a bit more to account for potential invalid zaps
+        } as NostrFilter
+      );
+      
+      let potentialSentZaps: NostrEvent[] = [];
+      try {
+        potentialSentZaps = await Promise.race([directSentZapsPromise, timeoutPromise]) as NostrEvent[];
+        if (debug) console.error(`Direct #P tag query returned ${potentialSentZaps.length} results`);
+      } catch (e: unknown) {
+        if (debug) console.error(`Direct #P tag query failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+      
+      // If the direct query didn't return enough results, try the fallback method
+      if (!potentialSentZaps || potentialSentZaps.length < limit) {
+        if (debug) console.error("Direct query yielded insufficient results, trying fallback approach...");
+        
+        // Try a fallback approach - fetch a larger set of zap receipts
+        const zapsPromise = pool.querySync(
+          relaysToUse,
+          {
+            kinds: [KINDS.ZapReceipt],
+            limit: Math.max(limit * 10, 100), // Get a larger sample
+          } as NostrFilter
+        );
+        
+        const additionalZaps = await Promise.race([zapsPromise, timeoutPromise]) as NostrEvent[];
+        
+        if (debug) {
+          console.error(`Retrieved ${additionalZaps?.length || 0} additional zap receipts to analyze`);
+        }
+        
+        if (additionalZaps && additionalZaps.length > 0) {
+          // Add these to our potential sent zaps
+          potentialSentZaps = [...potentialSentZaps, ...additionalZaps];
+        }
+      }
+      
+      if (!potentialSentZaps || potentialSentZaps.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "No zap receipts found to analyze",
+              },
+            ],
+          };
+        }
+        
+      // Process and filter zaps
+      let processedZaps: CachedZap[] = [];
+      let invalidCount = 0;
+      let nonSentCount = 0;
+      
+      if (debug) {
+        console.error(`Processing ${potentialSentZaps.length} potential sent zaps...`);
+      }
+      
+      // Process each zap to determine if it was sent by the target pubkey
+      for (const zap of potentialSentZaps) {
+        try {
+          // Process the zap receipt with context of the target pubkey
+          const processedZap = processZapReceipt(zap as ZapReceipt, pubkey);
+          
+          // Skip zaps that aren't sent by this pubkey
+          if (processedZap.direction !== 'sent' && processedZap.direction !== 'self') {
+            if (debug) {
+              console.error(`Skipping zap ${zap.id.slice(0, 8)}... with direction ${processedZap.direction}`);
+            }
+            nonSentCount++;
+            continue;
+          }
+          
+          // Validate if requested
+          if (validateReceipts) {
+            const validationResult = validateZapReceipt(zap);
+            if (!validationResult.valid) {
+              if (debug) {
+                console.error(`Invalid zap receipt ${zap.id.slice(0, 8)}...: ${validationResult.reason}`);
+              }
+              invalidCount++;
+              continue;
+            }
+          }
+          
+          processedZaps.push(processedZap);
+          } catch (error) {
+            if (debug) {
+            console.error(`Error processing zap ${zap.id.slice(0, 8)}...`, error);
+          }
+        }
+      }
+      
+      // Deduplicate by zap ID
+      const uniqueZaps = new Map<string, CachedZap>();
+      processedZaps.forEach(zap => uniqueZaps.set(zap.id, zap));
+      processedZaps = Array.from(uniqueZaps.values());
+      
+      if (processedZaps.length === 0) {
+        let message = "No zaps sent by this public key were found.";
+        if (invalidCount > 0 || nonSentCount > 0) {
+          message += ` (${invalidCount} invalid zaps and ${nonSentCount} non-sent zaps were filtered out)`;
+        }
+        message += " This could be because:\n1. The user hasn't sent any zaps\n2. The zap receipts don't properly contain the sender's pubkey\n3. The relays queried don't have this data";
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: message,
+            },
+          ],
+        };
+      }
+      
+      // Sort zaps by created_at in descending order (newest first)
+      processedZaps.sort((a, b) => b.created_at - a.created_at);
+      
+      // Limit to requested number
+      processedZaps = processedZaps.slice(0, limit);
+      
+      // Calculate total sats sent
+      const totalSats = processedZaps.reduce((sum, zap) => sum + (zap.amountSats || 0), 0);
+      
+      // For debugging, examine the first zap in detail
+      if (debug && processedZaps.length > 0) {
+        const firstZap = processedZaps[0];
+        console.error("Sample sent zap:", JSON.stringify(firstZap, null, 2));
+      }
+      
+      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, pubkey)).join("\n");
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Found ${processedZaps.length} zaps sent by ${pubkey}.\nTotal sent: ${totalSats} sats\n\n${formattedZaps}`,
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error fetching sent zaps:", error);
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching sent zaps: ${error instanceof Error ? error.message : "Unknown error"}`,
+          },
+        ],
+      };
+    } finally {
+      // Clean up any subscriptions and close the pool
+      pool.close(relaysToUse);
+    }
+  },
+);
+
+server.tool(
+  "getAllZaps",
+  "Get all zaps (sent and received) for a public key",
+  {
+    pubkey: z.string().describe("Public key of the Nostr user (hex format)"),
+    limit: z.number().min(1).max(100).default(20).describe("Maximum number of total zaps to fetch"),
+    relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
+    validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
+    debug: z.boolean().default(false).describe("Enable verbose debug logging"),
+  },
+  async ({ pubkey, limit, relays, validateReceipts, debug }) => {
+    const relaysToUse = relays || DEFAULT_RELAYS;
+    // Create a fresh pool for this request
+    const pool = getFreshPool();
+    
+    try {
+      console.error(`Fetching all zaps for ${pubkey} from ${relaysToUse.join(", ")}`);
+      
+      // Use a more efficient approach: fetch all potentially relevant zaps in parallel
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
+      });
+      
+      // Prepare all required queries in parallel to reduce total time
+      const fetchPromises = [
+        // 1. Fetch received zaps (lowercase 'p' tag)
+        pool.querySync(
+        relaysToUse,
+        {
+          kinds: [KINDS.ZapReceipt],
+          "#p": [pubkey],
+            limit: Math.ceil(limit * 1.5),
+        } as NostrFilter
+        ),
+        
+        // 2. Fetch sent zaps (uppercase 'P' tag)
+        pool.querySync(
+        relaysToUse,
+        {
+          kinds: [KINDS.ZapReceipt],
+          "#P": [pubkey],
+            limit: Math.ceil(limit * 1.5),
+        } as NostrFilter
+        )
+      ];
+      
+      // Add a general query if we're in debug mode or need more comprehensive results
+      if (debug) {
+        fetchPromises.push(
+          pool.querySync(
+          relaysToUse,
+          {
+            kinds: [KINDS.ZapReceipt],
+              limit: Math.max(limit * 5, 50),
+          } as NostrFilter
+          )
+        );
+      }
+      
+      // Execute all queries in parallel
+      const results = await Promise.allSettled(fetchPromises);
+      
+      // Collect all zaps from successful queries
+      const allZaps: NostrEvent[] = [];
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          const zaps = result.value as NostrEvent[];
+        if (debug) {
+            const queryTypes = ['Received', 'Sent', 'General'];
+            console.error(`${queryTypes[index]} query returned ${zaps.length} results`);
+          }
+          allZaps.push(...zaps);
+        } else if (debug) {
+          const queryTypes = ['Received', 'Sent', 'General'];
+          console.error(`${queryTypes[index]} query failed:`, result.reason);
+        }
+      });
+      
+      if (allZaps.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: "No zaps found for this public key. Try specifying different relays that might have the data.",
+            },
+          ],
+        };
+      }
+      
+      if (debug) {
+        console.error(`Retrieved ${allZaps.length} total zaps before deduplication`);
+      }
+      
+      // Deduplicate by zap ID
+      const uniqueZapsMap = new Map<string, NostrEvent>();
+      allZaps.forEach(zap => uniqueZapsMap.set(zap.id, zap));
+      const uniqueZaps = Array.from(uniqueZapsMap.values());
+      
+      if (debug) {
+        console.error(`Deduplicated to ${uniqueZaps.length} unique zaps`);
+      }
+      
+      // Process each zap to determine its relevance to the target pubkey
+      let processedZaps: CachedZap[] = [];
+      let invalidCount = 0;
+      let irrelevantCount = 0;
+      
+      for (const zap of uniqueZaps) {
+        try {
+          // Process the zap with the target pubkey as context
+          const processedZap = processZapReceipt(zap as ZapReceipt, pubkey);
+          
+          // Skip zaps that are neither sent nor received by this pubkey
+          if (processedZap.direction === 'unknown') {
+              if (debug) {
+              console.error(`Skipping irrelevant zap ${zap.id.slice(0, 8)}...`);
+            }
+            irrelevantCount++;
+            continue;
+          }
+          
+          // Validate if requested
+          if (validateReceipts) {
+            const validationResult = validateZapReceipt(zap);
+            if (!validationResult.valid) {
+            if (debug) {
+                console.error(`Invalid zap receipt ${zap.id.slice(0, 8)}...: ${validationResult.reason}`);
+            }
+              invalidCount++;
+              continue;
+          }
+          }
+        
+          processedZaps.push(processedZap);
+        } catch (error) {
+        if (debug) {
+            console.error(`Error processing zap ${zap.id.slice(0, 8)}...`, error);
+          }
+        }
+      }
+      
+      if (processedZaps.length === 0) {
+        let message = "No relevant zaps found for this public key.";
+        if (invalidCount > 0 || irrelevantCount > 0) {
+          message += ` (${invalidCount} invalid zaps and ${irrelevantCount} irrelevant zaps were filtered out)`;
+        }
+        
+        return {
+          content: [
+            {
+              type: "text",
+              text: message,
+            },
+          ],
+        };
+      }
+      
+      // Sort zaps by created_at in descending order (newest first)
+      processedZaps.sort((a, b) => b.created_at - a.created_at);
+      
+      // Calculate statistics: sent, received, and self zaps
+      const sentZaps = processedZaps.filter(zap => zap.direction === 'sent');
+      const receivedZaps = processedZaps.filter(zap => zap.direction === 'received');
+      const selfZaps = processedZaps.filter(zap => zap.direction === 'self');
+      
+      // Calculate total sats
+      const totalSent = sentZaps.reduce((sum, zap) => sum + (zap.amountSats || 0), 0);
+      const totalReceived = receivedZaps.reduce((sum, zap) => sum + (zap.amountSats || 0), 0);
+      const totalSelfZaps = selfZaps.reduce((sum, zap) => sum + (zap.amountSats || 0), 0);
+      
+      // Limit to requested number for display
+      processedZaps = processedZaps.slice(0, limit);
+      
+      // Format the zaps with the pubkey context
+      const formattedZaps = processedZaps.map(zap => formatZapReceipt(zap, pubkey)).join("\n");
+      
+      // Prepare summary statistics
+      const summary = [
+        `Zap Summary for ${pubkey}:`,
+        `- ${sentZaps.length} zaps sent (${totalSent} sats)`,
+        `- ${receivedZaps.length} zaps received (${totalReceived} sats)`,
+        `- ${selfZaps.length} self-zaps (${totalSelfZaps} sats)`,
+        `- Net balance: ${totalReceived - totalSent} sats`,
+        `\nShowing ${processedZaps.length} most recent zaps:\n`
+      ].join("\n");
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `${summary}\n${formattedZaps}`,
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error fetching all zaps:", error);
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching all zaps: ${error instanceof Error ? error.message : "Unknown error"}`,
+          },
+        ],
+      };
+    } finally {
+      // Clean up any subscriptions and close the pool
+      pool.close(relaysToUse);
+    }
+  },
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
@@ -516,4 +1294,15 @@ async function main() {
 main().catch((error) => {
   console.error("Fatal error in main():", error);
   process.exit(1);
+});
+
+// Add handlers for unexpected termination
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught exception:', error);
+  // Don't exit - keep the server running
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled rejection at:', promise, 'reason:', reason);
+  // Don't exit - keep the server running
 }); 
