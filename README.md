@@ -20,7 +20,7 @@ All tools fully support both hex public keys and npub format, with user-friendly
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/nostr-mcp-server.git
+git clone https://github.com/austinkelsay/nostr-mcp-server.git
 cd nostr-mcp-server
 
 # Install dependencies
