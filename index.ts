@@ -1499,6 +1499,119 @@ server.tool(
   },
 );
 
+server.tool(
+  "getLongFormNotes",
+  "Get long-form notes (kind 30023) by public key",
+  {
+    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
+    limit: z.number().min(1).max(100).default(10).describe("Maximum number of notes to fetch"),
+    relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
+  },
+  async ({ pubkey, limit, relays }) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
+    const relaysToUse = relays || DEFAULT_RELAYS;
+    // Create a fresh pool for this request
+    const pool = getFreshPool();
+    
+    try {
+      console.error(`Fetching long-form notes for ${hexPubkey} from ${relaysToUse.join(", ")}`);
+      
+      // Use the querySync method with a timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
+      });
+      
+      const notesPromise = pool.querySync(
+        relaysToUse,
+        {
+          kinds: [30023], // NIP-23 long-form content
+          authors: [hexPubkey],
+          limit,
+        } as NostrFilter
+      );
+      
+      const notes = await Promise.race([notesPromise, timeoutPromise]) as NostrEvent[];
+      
+      if (!notes || notes.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No long-form notes found for ${displayPubkey}`,
+            },
+          ],
+        };
+      }
+      
+      // Sort notes by created_at in descending order (newest first)
+      notes.sort((a, b) => b.created_at - a.created_at);
+      
+      // Format each note with enhanced metadata
+      const formattedNotes = notes.map(note => {
+        // Extract metadata from tags
+        const title = note.tags.find(tag => tag[0] === "title")?.[1] || "Untitled";
+        const image = note.tags.find(tag => tag[0] === "image")?.[1];
+        const summary = note.tags.find(tag => tag[0] === "summary")?.[1];
+        const publishedAt = note.tags.find(tag => tag[0] === "published_at")?.[1];
+        const identifier = note.tags.find(tag => tag[0] === "d")?.[1];
+        
+        // Format the output
+        const lines = [
+          `Title: ${title}`,
+          `Created: ${new Date(note.created_at * 1000).toLocaleString()}`,
+          publishedAt ? `Published: ${new Date(parseInt(publishedAt) * 1000).toLocaleString()}` : null,
+          image ? `Image: ${image}` : null,
+          summary ? `Summary: ${summary}` : null,
+          identifier ? `Identifier: ${identifier}` : null,
+          `Content:`,
+          note.content,
+          `---`,
+        ].filter(Boolean).join("\n");
+        
+        return lines;
+      }).join("\n\n");
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Found ${notes.length} long-form notes from ${displayPubkey}:\n\n${formattedNotes}`,
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error fetching long-form notes:", error);
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching long-form notes for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
+          },
+        ],
+      };
+    } finally {
+      // Clean up any subscriptions and close the pool
+      pool.close(relaysToUse);
+    }
+  },
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);

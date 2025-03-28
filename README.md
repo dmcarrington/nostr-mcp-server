@@ -6,13 +6,14 @@ https://github.com/user-attachments/assets/1d2d47d0-c61b-44e2-85be-5985d2a81c64
 
 ## Features
 
-This server implements five tools for interacting with the Nostr network:
+This server implements six tools for interacting with the Nostr network:
 
 1. `getProfile`: Fetches a user's profile information by public key
 2. `getKind1Notes`: Fetches text notes (kind 1) authored by a user
-3. `getReceivedZaps`: Fetches zaps received by a user, including detailed payment information
-4. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
-5. `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
+3. `getLongFormNotes`: Fetches long-form content (kind 30023) authored by a user
+4. `getReceivedZaps`: Fetches zaps received by a user, including detailed payment information
+5. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
+6. `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
 
 All tools fully support both hex public keys and npub format, with user-friendly display of Nostr identifiers.
 
@@ -71,6 +72,7 @@ Once configured, you can ask Claude to use the Nostr tools by making requests li
 
 - "Show me the profile information for npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "What are the recent posts from npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8?"
+- "Show me the long-form articles from npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "How many zaps has npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8 received?"
 - "Show me the zaps sent by npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "Show me all zaps (both sent and received) for npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
