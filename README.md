@@ -6,7 +6,7 @@ https://github.com/user-attachments/assets/1d2d47d0-c61b-44e2-85be-5985d2a81c64
 
 ## Features
 
-This server implements six tools for interacting with the Nostr network:
+This server implements seven tools for interacting with the Nostr network:
 
 1. `getProfile`: Fetches a user's profile information by public key
 2. `getKind1Notes`: Fetches text notes (kind 1) authored by a user
@@ -14,6 +14,7 @@ This server implements six tools for interacting with the Nostr network:
 4. `getReceivedZaps`: Fetches zaps received by a user, including detailed payment information
 5. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
 6. `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
+7. `searchNips`: Search through Nostr Implementation Possibilities (NIPs) with relevance scoring
 
 All tools fully support both hex public keys and npub format, with user-friendly display of Nostr identifiers.
 
@@ -66,6 +67,41 @@ npm run build
 
 4. Restart Claude for Desktop.
 
+## Connecting to Cursor
+
+1. Make sure you have [Cursor](https://cursor.sh/) installed and updated to the latest version.
+
+2. Configure Cursor by creating or editing the configuration file:
+
+   For macOS:
+   ```bash
+   vim ~/.cursor/config.json
+   ```
+
+   For Windows:
+   ```bash
+   notepad %USERPROFILE%\.cursor\config.json
+   ```
+
+3. Add the Nostr server to your configuration:
+
+   ```json
+   {
+       "mcpServers": {
+           "nostr": {
+               "command": "node",
+               "args": [
+                   "/ABSOLUTE/PATH/TO/nostr-mcp-server/build/index.js"
+               ]
+           }
+       }
+   }
+   ```
+
+   Be sure to replace `/ABSOLUTE/PATH/TO/` with the actual path to your project.
+
+4. Restart Cursor.
+
 ## Usage in Claude
 
 Once configured, you can ask Claude to use the Nostr tools by making requests like:
@@ -76,6 +112,9 @@ Once configured, you can ask Claude to use the Nostr tools by making requests li
 - "How many zaps has npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8 received?"
 - "Show me the zaps sent by npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "Show me all zaps (both sent and received) for npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
+- "Search for NIPs about zaps"
+- "What NIPs are related to long-form content?"
+- "Show me NIP-23 with full content"
 
 The server automatically handles conversion between npub and hex formats, so you can use either format in your queries. Results are displayed with user-friendly npub identifiers.
 
@@ -92,6 +131,12 @@ You can also specify the number of notes or zaps to fetch:
 For zap queries, you can enable extra validation and debugging:
 
 - "Show me all zaps for npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8 with validation and debug enabled"
+
+For NIP searches, you can control the number of results and include full content:
+
+- "Search for NIPs about zaps with full content"
+- "Show me the top 5 NIPs about relays"
+- "What NIPs are related to encryption? Show me 15 results"
 
 ## Limitations
 
@@ -129,6 +174,18 @@ The server uses the following relays by default:
 
 To modify or extend this server:
 
-1. Edit the `index.ts` file in the project root
+1. Edit the relevant file in the project root:
+   - `index.ts`: Main server and tool registration
+   - `zap-tools.ts`: Zap-related functionality (getSentZaps, getReceivedZaps, getAllZaps)
+   - `nips-tools.ts`: NIPs search functionality
+
 2. Run `npm run build` to compile
-3. Restart Claude for Desktop to pick up your changes 
+
+3. Restart Claude for Desktop or Cursor to pick up your changes
+
+The codebase is organized into modules:
+- Core server setup and tools for profiles and notes are in `index.ts`
+- Zap functionality is encapsulated in `zap-tools.ts`
+- NIPs search is implemented in `nips-tools.ts`
+
+This separation makes the codebase more maintainable and easier to extend with new features.
