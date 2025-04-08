@@ -6,7 +6,7 @@ https://github.com/user-attachments/assets/1d2d47d0-c61b-44e2-85be-5985d2a81c64
 
 ## Features
 
-This server implements seven tools for interacting with the Nostr network:
+This server implements several tools for interacting with the Nostr network:
 
 1. `getProfile`: Fetches a user's profile information by public key
 2. `getKind1Notes`: Fetches text notes (kind 1) authored by a user
