@@ -15,6 +15,7 @@ This server implements seven tools for interacting with the Nostr network:
 5. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
 6. `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
 7. `searchNips`: Search through Nostr Implementation Possibilities (NIPs) with relevance scoring
+8. `sendAnonymousZap`: Prepare an anonymous zap to a profile or event, generating a lightning invoice for payment
 
 All tools fully support both hex public keys and npub format, with user-friendly display of Nostr identifiers.
 
@@ -115,6 +116,8 @@ Once configured, you can ask Claude to use the Nostr tools by making requests li
 - "Search for NIPs about zaps"
 - "What NIPs are related to long-form content?"
 - "Show me NIP-23 with full content"
+- "Send an anonymous zap of 100 sats to npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
+- "Send 1000 sats to note1abcdef... with a comment saying 'Great post!'"
 
 The server automatically handles conversion between npub and hex formats, so you can use either format in your queries. Results are displayed with user-friendly npub identifiers.
 
@@ -127,6 +130,11 @@ You can specify custom relays for any query:
 You can also specify the number of notes or zaps to fetch:
 
 - "Show me the latest 20 notes from npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
+
+For anonymous zaps, you can include optional comments and specify the target type:
+
+- "Send an anonymous zap of 500 sats to note1abcdef... with the comment 'Great post!'"
+- "Send 1000 sats anonymously to nevent1qys... using relay wss://relay.damus.io"
 
 For zap queries, you can enable extra validation and debugging:
 
@@ -152,7 +160,27 @@ For NIP searches, you can control the number of results and include full content
 - Smart caching system for improved performance with large volumes of zaps
 - Total sats calculations for sent/received/self zaps with net balance
 - Optional NIP-57 validation for ensuring zap receipt integrity
+- Anonymous zap support with lightning invoice generation
+- Support for zapping profiles, events (note IDs), and replaceable events (naddr)
 - Each tool call creates a fresh connection to the relays, ensuring reliable data retrieval
+
+## Anonymous Zaps
+
+The `sendAnonymousZap` tool lets users send zaps without revealing their Nostr identity. Key points about anonymous zaps:
+
+- The zap will appear to come from an anonymous user in the recipient's wallet
+- The zap follows the NIP-57 protocol but without a sender signature
+- The recipient can still receive the payment and any included message
+- You can zap profiles (using npub/hex pubkey), specific events (using note/nevent/hex ID), or replaceable events (using naddr)
+- The server generates a lightning invoice for payment that you can copy into your Lightning wallet
+
+Examples:
+```
+"Send an anonymous zap of 100 sats to npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
+"Send 1000 sats anonymously to note1abcdef... with the comment 'Great post!'"
+```
+
+The server fully validates LNURL services according to LNURL-pay (LUD-06) and Lightning Address (LUD-16) specifications, ensuring compatibility with various wallet implementations.
 
 ## Troubleshooting
 

@@ -24,6 +24,8 @@ import {
   processZapReceipt,
   validateZapReceipt,
   parseZapRequestData,
+  prepareAnonymousZap,
+  sendAnonymousZapToolConfig,
   getReceivedZapsToolConfig,
   getSentZapsToolConfig,
   getAllZapsToolConfig
@@ -54,6 +56,8 @@ function formatProfile(profile: NostrEvent): string {
     `Display Name: ${metadata.display_name || metadata.displayName || metadata.name || "Unknown"}`,
     `About: ${metadata.about || "No about information"}`,
     `NIP-05: ${metadata.nip05 || "Not set"}`,
+    `Lightning Address (LUD-16): ${metadata.lud16 || "Not set"}`,
+    `LNURL (LUD-06): ${metadata.lud06 || "Not set"}`,
     `Picture: ${metadata.picture || "No picture"}`,
     `Website: ${metadata.website || "No website"}`,
     `Created At: ${new Date(profile.created_at * 1000).toISOString()}`,
@@ -979,6 +983,63 @@ server.tool(
           {
             type: "text",
             text: `Error searching NIPs: ${error instanceof Error ? error.message : "Unknown error"}`,
+          },
+        ],
+      };
+    }
+  },
+);
+
+server.tool(
+  "sendAnonymousZap",
+  "Prepare an anonymous zap to a profile or event",
+  sendAnonymousZapToolConfig,
+  async ({ target, amountSats, comment, relays }) => {
+    // Use supplied relays or defaults
+    const relaysToUse = relays || DEFAULT_RELAYS;
+    
+    try {
+      console.error(`Preparing anonymous zap to ${target} for ${amountSats} sats`);
+      
+      // Prepare the anonymous zap
+      const zapResult = await prepareAnonymousZap(target, amountSats, comment, relaysToUse);
+      
+      if (!zapResult || !zapResult.success) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to prepare anonymous zap: ${zapResult?.message || "Unknown error"}`,
+            },
+          ],
+        };
+      }
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Anonymous zap prepared successfully!\n\nAmount: ${amountSats} sats${comment ? `\nComment: "${comment}"` : ""}\nTarget: ${target}\n\nInvoice:\n${zapResult.invoice}\n\nCopy this invoice into your Lightning wallet to pay. After payment, the recipient will receive the zap anonymously.`,
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error in sendAnonymousZap tool:", error);
+      
+      let errorMessage = error instanceof Error ? error.message : "Unknown error";
+      
+      // Provide a more helpful message for common errors
+      if (errorMessage.includes("ENOTFOUND") || errorMessage.includes("ETIMEDOUT")) {
+        errorMessage = `Could not connect to the Lightning service. This might be a temporary network issue or the service might be down. Error: ${errorMessage}`;
+      } else if (errorMessage.includes("Timeout")) {
+        errorMessage = "The operation timed out. This might be due to slow relays or network connectivity issues.";
+      }
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error preparing anonymous zap: ${errorMessage}`,
           },
         ],
       };

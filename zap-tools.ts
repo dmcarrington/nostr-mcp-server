@@ -2,6 +2,9 @@ import { z } from "zod";
 import { decode } from "light-bolt11-decoder";
 import * as nip19 from "nostr-tools/nip19";
 import { SimplePool } from "nostr-tools/pool";
+import fetch from "node-fetch";
+import crypto from "crypto";
+import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 
 // Set a reasonable timeout for queries
 export const QUERY_TIMEOUT = 8000;
@@ -14,6 +17,15 @@ export const DEFAULT_RELAYS = [
   "wss://nos.lol",
   "wss://relay.current.fyi",
   "wss://nostr.bitcoiner.social"
+];
+
+// Add more popular relays that we can try if the default ones fail
+export const FALLBACK_RELAYS = [
+  "wss://purplepag.es",
+  "wss://relay.snort.social",
+  "wss://nostr.wine",
+  "wss://relay.nostr.info",
+  "wss://relay.wellorder.net"
 ];
 
 // Type definitions for Nostr
@@ -44,6 +56,25 @@ export const KINDS = {
   ZapRequest: 9734,
   ZapReceipt: 9735
 };
+
+// Interface for LNURL response data
+export interface LnurlPayResponse {
+  callback: string;
+  maxSendable: number;
+  minSendable: number;
+  metadata: string;
+  commentAllowed?: number;
+  nostrPubkey?: string; // Required for NIP-57 zaps
+  allowsNostr?: boolean;
+}
+
+// Interface for LNURL callback response
+export interface LnurlCallbackResponse {
+  pr: string; // Lightning invoice
+  routes: any[];
+  success?: boolean;
+  reason?: string;
+}
 
 // Zap-specific interfaces based on NIP-57
 export interface ZapRequest {
@@ -692,4 +723,633 @@ export const getAllZapsToolConfig = {
   relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
   validateReceipts: z.boolean().default(true).describe("Whether to validate zap receipts according to NIP-57"),
   debug: z.boolean().default(false).describe("Enable verbose debug logging"),
-}; 
+};
+
+// Helper function to decode a note identifier (note, nevent, naddr) to its components
+export async function decodeEventId(id: string): Promise<{ type: string, eventId?: string, pubkey?: string, kind?: number, relays?: string[], identifier?: string } | null> {
+  if (!id) return null;
+  
+  try {
+    // Clean up input
+    id = id.trim();
+    
+    // If it's already a hex event ID
+    if (/^[0-9a-fA-F]{64}$/i.test(id)) {
+      return {
+        type: 'eventId',
+        eventId: id.toLowerCase()
+      };
+    }
+    
+    // Try to decode as a bech32 entity
+    if (id.startsWith('note1') || id.startsWith('nevent1') || id.startsWith('naddr1')) {
+      try {
+        const decoded = nip19.decode(id);
+        
+        if (decoded.type === 'note') {
+          return {
+            type: 'note',
+            eventId: decoded.data as string
+          };
+        } else if (decoded.type === 'nevent') {
+          const data = decoded.data as { id: string, relays?: string[], author?: string };
+          return {
+            type: 'nevent',
+            eventId: data.id,
+            relays: data.relays,
+            pubkey: data.author
+          };
+        } else if (decoded.type === 'naddr') {
+          const data = decoded.data as { identifier: string, pubkey: string, kind: number, relays?: string[] };
+          return {
+            type: 'naddr',
+            pubkey: data.pubkey,
+            kind: data.kind,
+            relays: data.relays,
+            identifier: data.identifier
+          };
+        }
+      } catch (decodeError) {
+        console.error("Error decoding event identifier:", decodeError);
+        return null;
+      }
+    }
+    
+    // Not a valid event identifier format
+    return null;
+  } catch (error) {
+    console.error("Error decoding event identifier:", error);
+    return null;
+  }
+}
+
+// Function to prepare an anonymous zap
+export async function prepareAnonymousZap(
+  target: string,
+  amountSats: number,
+  comment: string = "",
+  relays: string[] = DEFAULT_RELAYS
+): Promise<{ invoice: string, success: boolean, message: string } | null> {
+  try {
+    // Convert amount to millisats
+    const amountMsats = amountSats * 1000;
+    
+    // Determine if target is a pubkey or an event
+    let hexPubkey: string | null = null;
+    let eventId: string | null = null;
+    let eventCoordinate: { kind: number, pubkey: string, identifier: string } | null = null;
+    
+    // First, try to parse as a pubkey
+    hexPubkey = npubToHex(target);
+    
+    // If not a pubkey, try to parse as an event identifier
+    if (!hexPubkey) {
+      const decodedEvent = await decodeEventId(target);
+      if (decodedEvent) {
+        if (decodedEvent.eventId) {
+          eventId = decodedEvent.eventId;
+        } else if (decodedEvent.pubkey) {
+          // For naddr, we got a pubkey but no event ID
+          hexPubkey = decodedEvent.pubkey;
+          
+          // If this is an naddr, store the information for creating an "a" tag later
+          if (decodedEvent.type === 'naddr' && decodedEvent.kind) {
+            eventCoordinate = {
+              kind: decodedEvent.kind,
+              pubkey: decodedEvent.pubkey,
+              identifier: decodedEvent.identifier || ''
+            };
+          }
+        }
+      }
+    }
+    
+    // If we couldn't determine a valid target, return error
+    if (!hexPubkey && !eventId) {
+      return {
+        invoice: "",
+        success: false,
+        message: "Invalid target. Please provide a valid npub, hex pubkey, note ID, or event ID."
+      };
+    }
+    
+    // Create a fresh pool for this request
+    const pool = getFreshPool();
+    
+    try {
+      // Find the user's metadata to get their LNURL
+      let profileFilter: NostrFilter = { kinds: [KINDS.Metadata] };
+      
+      if (hexPubkey) {
+        profileFilter = {
+          kinds: [KINDS.Metadata],
+          authors: [hexPubkey],
+        };
+      } else if (eventId) {
+        // First get the event to find the author
+        const eventFilter = { ids: [eventId] };
+        
+        const eventPromise = pool.get(relays, eventFilter as NostrFilter);
+        const event = await Promise.race([
+          eventPromise, 
+          new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT))
+        ]) as NostrEvent;
+        
+        if (!event) {
+          return {
+            invoice: "",
+            success: false,
+            message: `Could not find event with ID ${eventId}`
+          };
+        }
+        
+        hexPubkey = event.pubkey;
+        profileFilter = {
+          kinds: [KINDS.Metadata],
+          authors: [hexPubkey],
+        };
+      }
+      
+      // Collect all relays to try
+      const allRelays = [...new Set([...relays, ...DEFAULT_RELAYS, ...FALLBACK_RELAYS])];
+      
+      // Get the user's profile
+      let profile: NostrEvent | null = null;
+      
+      for (const relaySet of [relays, DEFAULT_RELAYS, FALLBACK_RELAYS]) {
+        if (relaySet.length === 0) continue;
+        try {
+          const profilePromise = pool.get(relaySet, profileFilter as NostrFilter);
+          profile = await Promise.race([
+            profilePromise, 
+            new Promise<never>((_, reject) => setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT))
+          ]) as NostrEvent;
+          
+          if (profile) break;
+        } catch (error) {
+          // Continue to next relay set
+        }
+      }
+      
+      if (!profile) {
+        return {
+          invoice: "",
+          success: false,
+          message: "Could not find profile for the target user. Their profile may not exist on our known relays."
+        };
+      }
+      
+      // Parse the profile to get the lightning address or LNURL
+      let lnurl: string | null = null;
+      
+      try {
+        const metadata = JSON.parse(profile.content);
+        
+        // Check standard LUD-16/LUD-06 fields
+        lnurl = metadata.lud16 || metadata.lud06 || null;
+        
+        // Check for alternate capitalizations that some clients might use
+        if (!lnurl) {
+          lnurl = metadata.LUD16 || metadata.LUD06 || 
+                 metadata.Lud16 || metadata.Lud06 || 
+                 metadata.lightning || metadata.LIGHTNING || 
+                 metadata.lightningAddress || 
+                 null;
+        }
+        
+        if (!lnurl) {
+          // Check if there's any key that contains "lud" or "lightning"
+          const ludKey = Object.keys(metadata).find(key => 
+            key.toLowerCase().includes('lud') || 
+            key.toLowerCase().includes('lightning')
+          );
+          
+          if (ludKey) {
+            lnurl = metadata[ludKey];
+          }
+        }
+        
+        if (!lnurl) {
+          return {
+            invoice: "",
+            success: false,
+            message: "Target user does not have a lightning address or LNURL configured in their profile"
+          };
+        }
+        
+        // If it's a lightning address (contains @), convert to LNURL
+        if (lnurl.includes('@')) {
+          const [name, domain] = lnurl.split('@');
+          // Per LUD-16, properly encode username with encodeURIComponent
+          const encodedName = encodeURIComponent(name);
+          lnurl = `https://${domain}/.well-known/lnurlp/${encodedName}`;
+        } else if (lnurl.toLowerCase().startsWith('lnurl')) {
+          // Decode bech32 LNURL to URL
+          try {
+            lnurl = Buffer.from(bech32ToArray(lnurl.toLowerCase().substring(5))).toString();
+          } catch (e) {
+            return {
+              invoice: "",
+              success: false,
+              message: "Invalid LNURL format"
+            };
+          }
+        }
+        
+        // Make sure it's HTTP or HTTPS if not already
+        if (!lnurl.startsWith('http://') && !lnurl.startsWith('https://')) {
+          // Default to HTTPS
+          lnurl = 'https://' + lnurl;
+        }
+      } catch (error) {
+        return {
+          invoice: "",
+          success: false,
+          message: "Error parsing user profile"
+        };
+      }
+      
+      if (!lnurl) {
+        return {
+          invoice: "",
+          success: false,
+          message: "Could not determine LNURL from user profile"
+        };
+      }
+      
+      // Step 1: Query the LNURL to get the callback URL
+      let lnurlResponse;
+      try {
+        lnurlResponse = await fetch(lnurl, {
+          headers: {
+            'Accept': 'application/json',
+            'User-Agent': 'Nostr-MCP-Server/1.0'
+          }
+        });
+        
+        if (!lnurlResponse.ok) {
+          let errorText = "";
+          try {
+            errorText = await lnurlResponse.text();
+          } catch (e) {
+            // Ignore if we can't read the error text
+          }
+          
+          return {
+            invoice: "",
+            success: false,
+            message: `LNURL request failed with status ${lnurlResponse.status}${errorText ? `: ${errorText}` : ""}`
+          };
+        }
+      } catch (error) {
+        return {
+          invoice: "",
+          success: false,
+          message: `Error connecting to LNURL: ${error instanceof Error ? error.message : "Unknown error"}`
+        };
+      }
+      
+      let lnurlData;
+      try {
+        const responseText = await lnurlResponse.text();
+        lnurlData = JSON.parse(responseText) as LnurlPayResponse;
+      } catch (error) {
+        return {
+          invoice: "",
+          success: false,
+          message: `Invalid JSON response from LNURL service: ${error instanceof Error ? error.message : "Unknown error"}`
+        };
+      }
+      
+      // Extract metadata for better debugging
+      const metadataInfo = extractLnurlMetadata(lnurlData);
+      
+      // Check if the service supports NIP-57 zaps
+      if (!lnurlData.allowsNostr) {
+        return {
+          invoice: "",
+          success: false,
+          message: "The target user's lightning service does not support Nostr zaps"
+        };
+      }
+      
+      if (!lnurlData.nostrPubkey) {
+        return {
+          invoice: "",
+          success: false,
+          message: "The target user's lightning service does not provide a nostrPubkey for zaps"
+        };
+      }
+      
+      // Validate the callback URL
+      if (!lnurlData.callback || !isValidUrl(lnurlData.callback)) {
+        return {
+          invoice: "",
+          success: false,
+          message: `Invalid callback URL in LNURL response: ${lnurlData.callback}`
+        };
+      }
+      
+      // Validate amount limits
+      if (!lnurlData.minSendable || !lnurlData.maxSendable) {
+        return {
+          invoice: "",
+          success: false,
+          message: "The LNURL service did not provide valid min/max sendable amounts"
+        };
+      }
+      
+      if (amountMsats < lnurlData.minSendable) {
+        return {
+          invoice: "",
+          success: false,
+          message: `Amount too small. Minimum is ${lnurlData.minSendable / 1000} sats (you tried to send ${amountMsats / 1000} sats)`
+        };
+      }
+      
+      if (amountMsats > lnurlData.maxSendable) {
+        return {
+          invoice: "",
+          success: false,
+          message: `Amount too large. Maximum is ${lnurlData.maxSendable / 1000} sats (you tried to send ${amountMsats / 1000} sats)`
+        };
+      }
+      
+      // Validate comment length if the service has a limit
+      if (lnurlData.commentAllowed && comment.length > lnurlData.commentAllowed) {
+        comment = comment.substring(0, lnurlData.commentAllowed);
+      }
+      
+      // Step 2: Create the zap request tags
+      const zapRequestTags: string[][] = [
+        ["relays", ...relays.slice(0, 5)], // Include up to 5 relays
+        ["amount", amountMsats.toString()],
+        ["lnurl", lnurl]
+      ];
+      
+      // Add p or e tag depending on what we're zapping
+      if (hexPubkey) {
+        zapRequestTags.push(["p", hexPubkey]);
+      }
+      
+      if (eventId) {
+        zapRequestTags.push(["e", eventId]);
+      }
+      
+      // Add a tag for replaceable events (naddr)
+      if (eventCoordinate) {
+        const aTagValue = `${eventCoordinate.kind}:${eventCoordinate.pubkey}:${eventCoordinate.identifier}`;
+        zapRequestTags.push(["a", aTagValue]);
+      }
+      
+      // Create a proper one-time keypair for anonymous zapping
+      const anonymousSecretKey = generateSecretKey(); // This generates a proper 32-byte private key
+      const anonymousPubkeyHex = getPublicKey(anonymousSecretKey); // This computes the corresponding public key
+
+      // Create the zap request event template
+      const zapRequestTemplate = {
+        kind: 9734,
+        created_at: Math.floor(Date.now() / 1000),
+        content: comment,
+        tags: zapRequestTags,
+      };
+
+      // Properly finalize the event (calculates ID and signs it) using nostr-tools
+      const signedZapRequest = finalizeEvent(zapRequestTemplate, anonymousSecretKey);
+
+      // Create different formatted versions of the zap request for compatibility
+      const completeEventParam = encodeURIComponent(JSON.stringify(signedZapRequest));
+      const basicEventParam = encodeURIComponent(JSON.stringify({
+        kind: 9734,
+        created_at: Math.floor(Date.now() / 1000),
+        content: comment,
+        tags: zapRequestTags,
+        pubkey: anonymousPubkeyHex
+      }));
+      const tagsOnlyParam = encodeURIComponent(JSON.stringify({
+        tags: zapRequestTags
+      }));
+
+      // Try each approach in order
+      const approaches = [
+        { name: "Complete event with ID/sig", param: completeEventParam },
+        { name: "Basic event without ID/sig", param: basicEventParam },
+        { name: "Tags only", param: tagsOnlyParam },
+        // Add fallback approach without nostr parameter at all
+        { name: "No nostr parameter", param: null }
+      ];
+
+      // Flag to track if we've successfully processed any approach
+      let success = false;
+      let finalResult = null;
+      let lastError = "";
+      
+      for (const approach of approaches) {
+        if (success) break; // Skip if we already succeeded
+        
+        // Create a new URL for each attempt to avoid parameter pollution
+        const currentCallbackUrl = new URL(lnurlData.callback);
+        
+        // Add basic parameters - must include amount first per some implementations
+        currentCallbackUrl.searchParams.append("amount", amountMsats.toString());
+        
+        // Add comment if provided and allowed
+        if (comment && (!lnurlData.commentAllowed || lnurlData.commentAllowed > 0)) {
+          currentCallbackUrl.searchParams.append("comment", comment);
+        }
+        
+        // Add the nostr parameter for this approach (if not null)
+        if (approach.param !== null) {
+          currentCallbackUrl.searchParams.append("nostr", approach.param);
+        }
+        
+        const callbackUrlString = currentCallbackUrl.toString();
+        
+        try {
+          const callbackResponse = await fetch(callbackUrlString, {
+            method: 'GET', // Explicitly use GET as required by LUD-06
+            headers: {
+              'Accept': 'application/json',
+              'User-Agent': 'Nostr-MCP-Server/1.0'
+            }
+          });
+          
+          // Attempt to read the response body regardless of status code
+          let responseText = "";
+          try {
+            responseText = await callbackResponse.text();
+          } catch (e) {
+            // Ignore if we can't read the response
+          }
+          
+          if (!callbackResponse.ok) {
+            if (responseText) {
+              lastError = `Status ${callbackResponse.status}: ${responseText}`;
+            } else {
+              lastError = `Status ${callbackResponse.status}`;
+            }
+            continue; // Try the next approach
+          }
+          
+          // Successfully got a 2xx response, now parse it
+          let invoiceData;
+          try {
+            invoiceData = JSON.parse(responseText) as LnurlCallbackResponse;
+          } catch (error) {
+            lastError = `Invalid JSON in response: ${responseText}`;
+            continue; // Try the next approach
+          }
+          
+          // Check if the response has the expected structure
+          if (!invoiceData.pr) {
+            if (invoiceData.reason) {
+              lastError = invoiceData.reason;
+              // If the error message mentions the NIP-57/Nostr parameter specifically, try the next approach
+              if (lastError.toLowerCase().includes('nostr') || 
+                  lastError.toLowerCase().includes('customer') || 
+                  lastError.toLowerCase().includes('wallet')) {
+                continue; // Try the next approach
+              }
+            } else {
+              lastError = `Missing 'pr' field in response`;
+            }
+            continue; // Try the next approach
+          }
+          
+          // We got a valid invoice!
+          success = true;
+          finalResult = {
+            invoice: invoiceData.pr,
+            success: true,
+            message: `Successfully generated invoice using ${approach.name}`
+          };
+          break; // Exit the loop
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : "Unknown error";
+          // Continue to the next approach
+        }
+      }
+      
+      // If none of our approaches worked, return an error with the last error message
+      if (!success) {
+        return {
+          invoice: "",
+          success: false,
+          message: `Failed to generate invoice: ${lastError}`
+        };
+      }
+      
+      return finalResult;
+    } catch (error) {
+      return {
+        invoice: "",
+        success: false,
+        message: `Error preparing zap: ${error instanceof Error ? error.message : "Unknown error"}`
+      };
+    } finally {
+      // Clean up any subscriptions and close the pool
+      pool.close(relays);
+    }
+  } catch (error) {
+    return {
+      invoice: "",
+      success: false,
+      message: `Fatal error: ${error instanceof Error ? error.message : "Unknown error"}`
+    };
+  }
+}
+
+// Helper function to decode bech32-encoded LNURL
+function bech32ToArray(bech32Str: string): Uint8Array {
+  // Extract the 5-bit words
+  let words: number[] = [];
+  for (let i = 0; i < bech32Str.length; i++) {
+    const c = bech32Str.charAt(i);
+    const charCode = c.charCodeAt(0);
+    if (charCode < 33 || charCode > 126) {
+      throw new Error(`Invalid character: ${c}`);
+    }
+    
+    const value = "qpzry9x8gf2tvdw0s3jn54khce6mua7l".indexOf(c.toLowerCase());
+    if (value === -1) {
+      throw new Error(`Invalid character: ${c}`);
+    }
+    
+    words.push(value);
+  }
+  
+  // Convert 5-bit words to 8-bit bytes
+  const result = new Uint8Array(Math.floor((words.length * 5) / 8));
+  let bitIndex = 0;
+  let byteIndex = 0;
+  
+  for (let i = 0; i < words.length; i++) {
+    const value = words[i];
+    
+    // Extract the bits from this word
+    for (let j = 0; j < 5; j++) {
+      const bit = (value >> (4 - j)) & 1;
+      
+      // Set the bit in the result
+      if (bit) {
+        result[byteIndex] |= 1 << (7 - bitIndex);
+      }
+      
+      bitIndex++;
+      if (bitIndex === 8) {
+        bitIndex = 0;
+        byteIndex++;
+      }
+    }
+  }
+  
+  return result;
+}
+
+// Export the tool configuration for anonymous zap
+export const sendAnonymousZapToolConfig = {
+  target: z.string().describe("Target to zap - can be a pubkey (hex or npub) or an event ID (nevent, note, naddr, or hex)"),
+  amountSats: z.number().min(1).describe("Amount to zap in satoshis"),
+  comment: z.string().default("").describe("Optional comment to include with the zap"),
+  relays: z.array(z.string()).optional().describe("Optional list of relays to query")
+};
+
+// Add a function to verify the callback URL scheme and validate the response
+function isValidUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+// Add this function to extract metadata from the LNURL response
+function extractLnurlMetadata(lnurlData: LnurlPayResponse): { payeeName?: string, payeeEmail?: string } {
+  if (!lnurlData.metadata) return {};
+  
+  try {
+    const metadata = JSON.parse(lnurlData.metadata);
+    if (!Array.isArray(metadata)) return {};
+    
+    let payeeName: string | undefined;
+    let payeeEmail: string | undefined;
+    
+    // Extract information from metadata as per LUD-06
+    for (const entry of metadata) {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        if (entry[0] === "text/plain") {
+          payeeName = entry[1] as string;
+        }
+        if (entry[0] === "text/email" || entry[0] === "text/identifier") {
+          payeeEmail = entry[1] as string;
+        }
+      }
+    }
+    
+    return { payeeName, payeeEmail };
+  } catch (error) {
+    console.error("Error parsing LNURL metadata:", error);
+    return {};
+  }
+} 
