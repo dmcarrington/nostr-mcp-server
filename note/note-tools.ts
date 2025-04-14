@@ -1,14 +1,7 @@
 import { z } from "zod";
 import {
-  NostrEvent,
-  NostrFilter,
-  KINDS,
-  DEFAULT_RELAYS,
-  QUERY_TIMEOUT,
-  getFreshPool,
-  npubToHex,
-  formatPubkey
-} from "./utils/index.js";
+  NostrEvent
+} from "../utils/index.js";
 
 // Schema for getProfile tool
 export const getProfileToolConfig = {

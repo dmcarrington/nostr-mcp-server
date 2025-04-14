@@ -2,7 +2,6 @@ import { z } from "zod";
 import { decode } from "light-bolt11-decoder";
 import * as nip19 from "nostr-tools/nip19";
 import fetch from "node-fetch";
-import crypto from "crypto";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
 import {
   NostrEvent,
@@ -13,9 +12,8 @@ import {
   QUERY_TIMEOUT,
   getFreshPool,
   npubToHex,
-  hexToNpub,
-  formatPubkey
-} from "./utils/index.js";
+  hexToNpub
+} from "../utils/index.js";
 
 // Interface for LNURL response data
 export interface LnurlPayResponse {
@@ -612,6 +610,100 @@ export async function decodeEventId(id: string): Promise<{ type: string, eventId
   }
 }
 
+// Export the tool configuration for anonymous zap
+export const sendAnonymousZapToolConfig = {
+  target: z.string().describe("Target to zap - can be a pubkey (hex or npub) or an event ID (nevent, note, naddr, or hex)"),
+  amountSats: z.number().min(1).describe("Amount to zap in satoshis"),
+  comment: z.string().default("").describe("Optional comment to include with the zap"),
+  relays: z.array(z.string()).optional().describe("Optional list of relays to query")
+};
+
+// Helper functions for the sendAnonymousZap tool
+function isValidUrl(urlString: string): boolean {
+  try {
+    const url = new URL(urlString);
+    return url.protocol === 'https:' || url.protocol === 'http:';
+  } catch {
+    return false;
+  }
+}
+
+function extractLnurlMetadata(lnurlData: LnurlPayResponse): { payeeName?: string, payeeEmail?: string } {
+  if (!lnurlData.metadata) return {};
+  
+  try {
+    const metadata = JSON.parse(lnurlData.metadata);
+    if (!Array.isArray(metadata)) return {};
+    
+    let payeeName: string | undefined;
+    let payeeEmail: string | undefined;
+    
+    // Extract information from metadata as per LUD-06
+    for (const entry of metadata) {
+      if (Array.isArray(entry) && entry.length >= 2) {
+        if (entry[0] === "text/plain") {
+          payeeName = entry[1] as string;
+        }
+        if (entry[0] === "text/email" || entry[0] === "text/identifier") {
+          payeeEmail = entry[1] as string;
+        }
+      }
+    }
+    
+    return { payeeName, payeeEmail };
+  } catch (error) {
+    console.error("Error parsing LNURL metadata:", error);
+    return {};
+  }
+}
+
+// Helper function to decode bech32-encoded LNURL
+function bech32ToArray(bech32Str: string): Uint8Array {
+  // Extract the 5-bit words
+  let words: number[] = [];
+  for (let i = 0; i < bech32Str.length; i++) {
+    const c = bech32Str.charAt(i);
+    const charCode = c.charCodeAt(0);
+    if (charCode < 33 || charCode > 126) {
+      throw new Error(`Invalid character: ${c}`);
+    }
+    
+    const value = "qpzry9x8gf2tvdw0s3jn54khce6mua7l".indexOf(c.toLowerCase());
+    if (value === -1) {
+      throw new Error(`Invalid character: ${c}`);
+    }
+    
+    words.push(value);
+  }
+  
+  // Convert 5-bit words to 8-bit bytes
+  const result = new Uint8Array(Math.floor((words.length * 5) / 8));
+  let bitIndex = 0;
+  let byteIndex = 0;
+  
+  for (let i = 0; i < words.length; i++) {
+    const value = words[i];
+    
+    // Extract the bits from this word
+    for (let j = 0; j < 5; j++) {
+      const bit = (value >> (4 - j)) & 1;
+      
+      // Set the bit in the result
+      if (bit) {
+        result[byteIndex] |= 1 << (7 - bitIndex);
+      }
+      
+      bitIndex++;
+      if (bitIndex === 8) {
+        bitIndex = 0;
+        byteIndex++;
+      }
+    }
+  }
+  
+  return result;
+}
+
 // Function to prepare an anonymous zap
 export async function prepareAnonymousZap(
   target: string,
@@ -698,9 +790,6 @@ export async function prepareAnonymousZap(
           authors: [hexPubkey],
         };
       }
-      
-      // Collect all relays to try
-      const allRelays = [...new Set([...relays, ...DEFAULT_RELAYS, ...FALLBACK_RELAYS])];
       
       // Get the user's profile
       let profile: NostrEvent | null = null;
@@ -849,9 +938,6 @@ export async function prepareAnonymousZap(
           message: `Invalid JSON response from LNURL service: ${error instanceof Error ? error.message : "Unknown error"}`
         };
       }
-      
-      // Extract metadata for better debugging
-      const metadataInfo = extractLnurlMetadata(lnurlData);
       
       // Check if the service supports NIP-57 zaps
       if (!lnurlData.allowsNostr) {
@@ -1085,100 +1171,5 @@ export async function prepareAnonymousZap(
       success: false,
       message: `Fatal error: ${error instanceof Error ? error.message : "Unknown error"}`
     };
-  }
-}
-
-// Helper function to decode bech32-encoded LNURL
-function bech32ToArray(bech32Str: string): Uint8Array {
-  // Extract the 5-bit words
-  let words: number[] = [];
-  for (let i = 0; i < bech32Str.length; i++) {
-    const c = bech32Str.charAt(i);
-    const charCode = c.charCodeAt(0);
-    if (charCode < 33 || charCode > 126) {
-      throw new Error(`Invalid character: ${c}`);
-    }
-    
-    const value = "qpzry9x8gf2tvdw0s3jn54khce6mua7l".indexOf(c.toLowerCase());
-    if (value === -1) {
-      throw new Error(`Invalid character: ${c}`);
-    }
-    
-    words.push(value);
-  }
-  
-  // Convert 5-bit words to 8-bit bytes
-  const result = new Uint8Array(Math.floor((words.length * 5) / 8));
-  let bitIndex = 0;
-  let byteIndex = 0;
-  
-  for (let i = 0; i < words.length; i++) {
-    const value = words[i];
-    
-    // Extract the bits from this word
-    for (let j = 0; j < 5; j++) {
-      const bit = (value >> (4 - j)) & 1;
-      
-      // Set the bit in the result
-      if (bit) {
-        result[byteIndex] |= 1 << (7 - bitIndex);
-      }
-      
-      bitIndex++;
-      if (bitIndex === 8) {
-        bitIndex = 0;
-        byteIndex++;
-      }
-    }
-  }
-  
-  return result;
-}
-
-// Export the tool configuration for anonymous zap
-export const sendAnonymousZapToolConfig = {
-  target: z.string().describe("Target to zap - can be a pubkey (hex or npub) or an event ID (nevent, note, naddr, or hex)"),
-  amountSats: z.number().min(1).describe("Amount to zap in satoshis"),
-  comment: z.string().default("").describe("Optional comment to include with the zap"),
-  relays: z.array(z.string()).optional().describe("Optional list of relays to query")
-};
-
-// Add a function to verify the callback URL scheme and validate the response
-function isValidUrl(urlString: string): boolean {
-  try {
-    const url = new URL(urlString);
-    return url.protocol === 'https:' || url.protocol === 'http:';
-  } catch {
-    return false;
-  }
-}
-
-// Add this function to extract metadata from the LNURL response
-function extractLnurlMetadata(lnurlData: LnurlPayResponse): { payeeName?: string, payeeEmail?: string } {
-  if (!lnurlData.metadata) return {};
-  
-  try {
-    const metadata = JSON.parse(lnurlData.metadata);
-    if (!Array.isArray(metadata)) return {};
-    
-    let payeeName: string | undefined;
-    let payeeEmail: string | undefined;
-    
-    // Extract information from metadata as per LUD-06
-    for (const entry of metadata) {
-      if (Array.isArray(entry) && entry.length >= 2) {
-        if (entry[0] === "text/plain") {
-          payeeName = entry[1] as string;
-        }
-        if (entry[0] === "text/email" || entry[0] === "text/identifier") {
-          payeeEmail = entry[1] as string;
-        }
-      }
-    }
-    
-    return { payeeName, payeeEmail };
-  } catch (error) {
-    console.error("Error parsing LNURL metadata:", error);
-    return {};
   }
 } 

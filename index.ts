@@ -17,25 +17,22 @@ import {
 } from "./utils/index.js";
 import {
   ZapReceipt,
-  ZapCache,
-  zapCache,
   formatZapReceipt,
   processZapReceipt,
   validateZapReceipt,
-  parseZapRequestData,
   prepareAnonymousZap,
   sendAnonymousZapToolConfig,
   getReceivedZapsToolConfig,
   getSentZapsToolConfig,
   getAllZapsToolConfig
-} from "./zap-tools.js";
+} from "./zap/zap-tools.js";
 import {
   formatProfile,
   formatNote,
   getProfileToolConfig,
   getKind1NotesToolConfig,
   getLongFormNotesToolConfig
-} from "./note-tools.js";
+} from "./note/note-tools.js";
 
 // Set WebSocket implementation for Node.js
 (globalThis as any).WebSocket = WebSocket;
