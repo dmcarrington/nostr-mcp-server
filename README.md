@@ -217,6 +217,28 @@ To modify or extend this server:
 
 3. Restart Claude for Desktop or Cursor to pick up your changes
 
+## Testing
+
+We've implemented a simple test suite using Jest to test core functionality:
+
+```bash
+# Run all tests
+npm test
+
+# Run a specific test file
+npm test -- __tests__/basic.test.ts
+```
+
+The current tests focus on basic functionality without making any real network connections:
+
+- `basic.test.ts` - Tests simple profile formatting and zap receipt processing
+- `profile-notes-simple.test.ts` - Tests profile and note data structures
+- `zap-tools-simple.test.ts` - Tests zap processing and anonymous zap preparation
+
+All tests are intentionally simple and isolated, testing the business logic without relying on external services. This approach makes the tests fast, reliable, and suitable for continuous integration.
+
+## Codebase Organization
+
 The codebase is organized into modules:
 - Core server setup in `index.ts`
 - Specialized functionality in dedicated directories:
