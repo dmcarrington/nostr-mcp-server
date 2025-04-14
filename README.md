@@ -202,18 +202,27 @@ The server uses the following relays by default:
 
 To modify or extend this server:
 
-1. Edit the relevant file in the project root:
+1. Edit the relevant file:
    - `index.ts`: Main server and tool registration
-   - `zap-tools.ts`: Zap-related functionality (getSentZaps, getReceivedZaps, getAllZaps)
-   - `nips-tools.ts`: NIPs search functionality
+   - `note/note-tools.ts`: Profile and notes functionality ([Documentation](./note/README.md))
+   - `zap/zap-tools.ts`: Zap-related functionality ([Documentation](./zap/README.md))
+   - `nips/nips-tools.ts`: Functions for searching NIPs ([Documentation](./nips/README.md))
+   - `utils/`: Shared utility functions
+     - `constants.ts`: Global constants and relay configurations
+     - `conversion.ts`: Pubkey format conversion utilities
+     - `formatting.ts`: Output formatting helpers
+     - `pool.ts`: Nostr connection pool management
 
 2. Run `npm run build` to compile
 
 3. Restart Claude for Desktop or Cursor to pick up your changes
 
 The codebase is organized into modules:
-- Core server setup and tools for profiles and notes are in `index.ts`
-- Zap functionality is encapsulated in `zap-tools.ts`
-- NIPs search is implemented in `nips-tools.ts`
+- Core server setup in `index.ts`
+- Specialized functionality in dedicated directories:
+  - [`nips/`](./nips/README.md): NIPs search and caching functionality
+  - [`note/`](./note/README.md): Profile and notes functionality
+  - [`zap/`](./zap/README.md): Zap handling and anonymous zapping
+- Common utilities in the `utils/` directory
 
-This separation makes the codebase more maintainable and easier to extend with new features.
+This modular structure makes the codebase more maintainable, reduces duplication, and enables easier feature extensions. For detailed information about each module's features and implementation, see their respective documentation.

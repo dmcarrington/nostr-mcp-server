@@ -4,7 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import WebSocket from "ws";
-import { searchNips, formatNipResult } from "./nips-tools.js";
+import { searchNips, formatNipResult } from "./nips/nips-tools.js";
 import {
   NostrEvent,
   NostrFilter,
