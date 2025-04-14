@@ -2,6 +2,7 @@ import { z } from "zod";
 import fetch from "node-fetch";
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 
 // Define the NIP data structure
 export interface NipData {
@@ -21,9 +22,15 @@ export interface NipSearchResult {
   matchedTerms: string[];
 }
 
-// Cache configuration
-const CACHE_TTL = 1000 * 60 * 60 * 24; // 24 hours
-const CACHE_FILE = path.join(process.cwd(), 'nips-cache.json');
+// Cache configuration - 24 hours in milliseconds
+const CACHE_TTL = 1000 * 60 * 60 * 24;
+// Store cache in OS temp directory to ensure it's writable
+const CACHE_DIR = path.join(os.tmpdir(), 'nostr-mcp-server');
+const CACHE_FILE = path.join(CACHE_DIR, 'nips-cache.json');
+
+// Loading state management
+let isLoading = false;
+let lastError: Error | null = null;
 let nipsCache: NipData[] = [];
 let lastFetchTime = 0;
 
@@ -51,27 +58,53 @@ interface GitHubFile {
   download_url: string;
 }
 
-// Load cache from disk on startup
+// Ensure cache directory exists
+function ensureCacheDirectory() {
+  try {
+    if (!fs.existsSync(CACHE_DIR)) {
+      fs.mkdirSync(CACHE_DIR, { recursive: true });
+      console.error(`Created cache directory: ${CACHE_DIR}`);
+    }
+  } catch (error) {
+    console.error('Failed to create cache directory:', error);
+  }
+}
+
+// Load cache from disk with improved error handling
 function loadCacheFromDisk(): boolean {
   try {
+    ensureCacheDirectory();
+    
     if (fs.existsSync(CACHE_FILE)) {
       const cacheData = fs.readFileSync(CACHE_FILE, 'utf8');
-      const cacheObj = JSON.parse(cacheData);
       
-      if (cacheObj && Array.isArray(cacheObj.nips) && typeof cacheObj.timestamp === 'number') {
-        nipsCache = cacheObj.nips;
-        lastFetchTime = cacheObj.timestamp;
+      try {
+        const cacheObj = JSON.parse(cacheData);
         
-        // Check if cache is fresh enough
-        if (Date.now() - lastFetchTime < CACHE_TTL) {
-          console.log(`Loaded ${nipsCache.length} NIPs from cache file`);
-          buildSearchIndex();
-          return true;
-        } else {
-          console.log('Cache file exists but is expired');
-          // We'll still use it temporarily but will refresh
-          buildSearchIndex();
-          return false;
+        if (cacheObj && Array.isArray(cacheObj.nips) && typeof cacheObj.timestamp === 'number') {
+          nipsCache = cacheObj.nips;
+          lastFetchTime = cacheObj.timestamp;
+          
+          // Check if cache is fresh enough
+          if (Date.now() - lastFetchTime < CACHE_TTL) {
+            console.error(`Loaded ${nipsCache.length} NIPs from cache file`);
+            buildSearchIndex();
+            return true;
+          } else {
+            console.error('Cache file exists but is expired');
+            // We'll still use it temporarily but will refresh
+            buildSearchIndex();
+            return false;
+          }
+        }
+      } catch (parseError) {
+        console.error('Error parsing cache file:', parseError);
+        // If file exists but is corrupted, delete it
+        try {
+          fs.unlinkSync(CACHE_FILE);
+          console.error('Deleted corrupted cache file');
+        } catch (unlinkError) {
+          console.error('Failed to delete corrupted cache file:', unlinkError);
         }
       }
     }
@@ -82,23 +115,31 @@ function loadCacheFromDisk(): boolean {
   }
 }
 
-// Save cache to disk
+// Save cache to disk with improved error handling
 function saveCacheToDisk(): void {
   try {
+    ensureCacheDirectory();
+    
     const cacheObj = {
       nips: nipsCache,
       timestamp: lastFetchTime
     };
     
-    fs.writeFileSync(CACHE_FILE, JSON.stringify(cacheObj, null, 2), 'utf8');
-    console.log(`Saved ${nipsCache.length} NIPs to cache file`);
+    // Write to a temporary file first, then rename to avoid corruption
+    const tempFile = `${CACHE_FILE}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(cacheObj, null, 2), 'utf8');
+    fs.renameSync(tempFile, CACHE_FILE);
+    
+    console.error(`Saved ${nipsCache.length} NIPs to cache file`);
   } catch (error) {
     console.error('Error saving cache to disk:', error);
   }
 }
 
-// Build search index from nips cache
+// Build search index from nips cache - optimized for speed
 function buildSearchIndex(): void {
+  console.error('Starting buildSearchIndex');
+  
   // Reset indexes
   searchIndex = {
     titleIndex: new Map(),
@@ -109,6 +150,41 @@ function buildSearchIndex(): void {
     tagIndex: new Map()
   };
   
+  // Pre-allocate sets to reduce memory allocations
+  const uniqueWords = new Set<string>();
+  
+  // First pass: collect all unique words
+  for (const nip of nipsCache) {
+    // Index title words
+    const titleWords = nip.title.toLowerCase().split(/\W+/).filter(word => word.length > 0);
+    titleWords.forEach(word => uniqueWords.add(word));
+    
+    // Index description words
+    const descWords = nip.description.toLowerCase().split(/\W+/).filter(word => word.length > 0);
+    descWords.forEach(word => uniqueWords.add(word));
+    
+    // Index content selectively
+    const contentWords = new Set(
+      nip.content.toLowerCase()
+        .split(/\W+/)
+        .filter(word => word.length > 3)
+    );
+    contentWords.forEach(word => uniqueWords.add(word));
+    
+    // Add tags
+    if (nip.tags) {
+      nip.tags.forEach(tag => uniqueWords.add(tag.toLowerCase().trim()));
+    }
+  }
+  
+  // Pre-allocate maps for each unique word
+  uniqueWords.forEach(word => {
+    searchIndex.titleIndex.set(word, new Set());
+    searchIndex.descriptionIndex.set(word, new Set());
+    searchIndex.contentIndex.set(word, new Set());
+  });
+  
+  // Second pass: fill the indexes
   for (const nip of nipsCache) {
     // Index NIP number
     searchIndex.numberIndex.set(nip.number.toString(), nip.number);
@@ -116,18 +192,12 @@ function buildSearchIndex(): void {
     // Index title words
     const titleWords = nip.title.toLowerCase().split(/\W+/).filter(word => word.length > 0);
     for (const word of titleWords) {
-      if (!searchIndex.titleIndex.has(word)) {
-        searchIndex.titleIndex.set(word, new Set());
-      }
       searchIndex.titleIndex.get(word)?.add(nip.number);
     }
     
     // Index description words
     const descWords = nip.description.toLowerCase().split(/\W+/).filter(word => word.length > 0);
     for (const word of descWords) {
-      if (!searchIndex.descriptionIndex.has(word)) {
-        searchIndex.descriptionIndex.set(word, new Set());
-      }
       searchIndex.descriptionIndex.get(word)?.add(nip.number);
     }
     
@@ -135,13 +205,10 @@ function buildSearchIndex(): void {
     const contentWords = new Set(
       nip.content.toLowerCase()
         .split(/\W+/)
-        .filter(word => word.length > 3) // Only index words longer than 3 chars
+        .filter(word => word.length > 3)
     );
     
     for (const word of contentWords) {
-      if (!searchIndex.contentIndex.has(word)) {
-        searchIndex.contentIndex.set(word, new Set());
-      }
       searchIndex.contentIndex.get(word)?.add(nip.number);
     }
     
@@ -165,86 +232,145 @@ function buildSearchIndex(): void {
     }
   }
   
-  console.log('Built search index for NIPs');
+  console.error('Completed buildSearchIndex');
+  console.error(`Built search index for ${nipsCache.length} NIPs with ${uniqueWords.size} unique terms`);
 }
 
-// Function to fetch NIPs from GitHub with retries
-async function fetchNipsFromGitHub(retries = 3): Promise<NipData[]> {
+// Calculate exponential backoff time for retries
+function calculateBackoff(attempt: number, baseMs: number = 1000, maxMs: number = 30000): number {
+  const backoff = Math.min(maxMs, baseMs * Math.pow(2, attempt - 1));
+  // Add jitter to avoid thundering herd problem
+  return backoff * (0.75 + Math.random() * 0.5);
+}
+
+// Function to fetch NIPs from GitHub with improved retries and error handling
+async function fetchNipsFromGitHub(retries = 5): Promise<NipData[]> {
+  isLoading = true;
+  lastError = null;
+  
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      console.log(`Fetching NIPs from GitHub (attempt ${attempt}/${retries})`);
+      console.error(`Fetching NIPs from GitHub (attempt ${attempt}/${retries})`);
       
-      // Fetch the NIPs directory listing
-      const headers: Record<string, string> = {};
+      // Fetch the NIPs directory listing with improved options
+      const headers: Record<string, string> = {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'nostr-mcp-server'
+      };
+      
       // Use conditional request if we already have data
       if (nipsCache.length > 0) {
         headers['If-Modified-Since'] = new Date(lastFetchTime).toUTCString();
       }
       
-      const response = await fetch('https://api.github.com/repos/nostr-protocol/nips/contents', { headers });
+      // Set timeout to avoid long-hanging requests
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      
+      const response = await fetch('https://api.github.com/repos/nostr-protocol/nips/contents', { 
+        headers,
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
       
       // If not modified, use cache
       if (response.status === 304) {
-        console.log('NIPs not modified since last fetch, using cache');
+        console.error('NIPs not modified since last fetch, using cache');
+        isLoading = false;
         return nipsCache;
       }
       
-      if (!response.ok) throw new Error(`GitHub API error: ${response.statusText}`);
+      if (!response.ok) {
+        throw new Error(`GitHub API error: ${response.status} ${response.statusText}`);
+      }
       
       const files = await response.json() as GitHubFile[];
       
-      // Filter for NIP markdown files
-      const nipFiles = files.filter((file: GitHubFile) => 
-        file.name.match(/^\d+\.md$/) || 
-        file.name.match(/^[0-9A-Fa-f]+\.md$/)
-      );
+      // Filter for NIP markdown files more efficiently with a single regex
+      const nipFileRegex = /^(\d+|[0-9A-Fa-f]+)\.md$/;
+      const nipFiles = files.filter((file: GitHubFile) => nipFileRegex.test(file.name));
       
-      console.log(`Found ${nipFiles.length} NIP files to process`);
+      console.error(`Found ${nipFiles.length} NIP files to process`);
       
-      // Process files in batches to avoid overwhelming the GitHub API
-      const batchSize = 5;
+      // Process files with improved concurrency controls
+      // Increased batch size but with connection limits
+      const batchSize = 10; // Process more files at once
       const nips: NipData[] = [];
       
+      // Load all NIPs concurrently in controlled batches
       for (let i = 0; i < nipFiles.length; i += batchSize) {
         const batch = nipFiles.slice(i, i + batchSize);
-        const batchPromises = batch.map(file => fetchNipFile(file));
+        const batchPromises = batch.map(file => fetchNipFile(file, attempt));
         
-        const batchResults = await Promise.all(batchPromises);
-        const validNips = batchResults.filter((nip): nip is NipData => nip !== null);
-        nips.push(...validNips);
-        
-        // Add a small delay between batches to avoid rate limiting
-        if (i + batchSize < nipFiles.length) {
-          await new Promise(resolve => setTimeout(resolve, 300));
+        try {
+          // Process batch with proper timeout
+          const batchResults = await Promise.allSettled(batchPromises);
+          
+          // Handle fulfilled promises
+          batchResults.forEach(result => {
+            if (result.status === 'fulfilled' && result.value !== null) {
+              nips.push(result.value);
+            }
+          });
+          
+          // Add a small delay between batches to avoid rate limiting, shorter delay
+          if (i + batchSize < nipFiles.length) {
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+        } catch (batchError) {
+          console.error(`Error processing batch starting at index ${i}:`, batchError);
+          // Continue to next batch even if current fails
         }
       }
       
-      console.log(`Successfully processed ${nips.length} NIPs`);
+      console.error(`Successfully processed ${nips.length} NIPs`);
+      isLoading = false;
+      
       return nips;
       
-    } catch (error) {
-      console.error(`Error fetching NIPs from GitHub (attempt ${attempt}/${retries}):`, error);
+    } catch (error: any) {
+      const typedError = error as Error;
+      console.error(`Error fetching NIPs from GitHub (attempt ${attempt}/${retries}):`, typedError.message);
+      lastError = typedError;
       
       if (attempt === retries) {
         // On final retry failure, return cache if available or empty array
-        console.warn('All GitHub fetch attempts failed, using cached data if available');
+        console.error('All GitHub fetch attempts failed, using cached data if available');
+        isLoading = false;
         return nipsCache.length > 0 ? nipsCache : [];
       }
       
-      // Wait before retrying (with increasing backoff)
-      await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+      // Exponential backoff with jitter before retrying
+      const backoffTime = calculateBackoff(attempt);
+      console.error(`Retrying in ${Math.round(backoffTime/1000)} seconds...`);
+      await new Promise(resolve => setTimeout(resolve, backoffTime));
     }
   }
   
+  isLoading = false;
   return [];
 }
 
-// Helper to fetch a single NIP file
-async function fetchNipFile(file: GitHubFile): Promise<NipData | null> {
+// Helper to fetch a single NIP file with improved error handling and timeouts
+async function fetchNipFile(file: GitHubFile, attemptNumber: number): Promise<NipData | null> {
   try {
-    const contentResponse = await fetch(file.download_url);
+    // Set timeout to avoid hanging requests - higher for content
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 15000);
+    
+    const contentResponse = await fetch(file.download_url, {
+      signal: controller.signal,
+      headers: {
+        'User-Agent': 'nostr-mcp-server',
+        'Accept': 'text/plain'
+      }
+    });
+    
+    clearTimeout(timeoutId);
+    
     if (!contentResponse.ok) {
-      console.warn(`Failed to fetch ${file.name}: ${contentResponse.statusText}`);
+      console.error(`Failed to fetch ${file.name}: ${contentResponse.status}`);
       return null;
     }
     
@@ -257,18 +383,24 @@ async function fetchNipFile(file: GitHubFile): Promise<NipData | null> {
       parseInt(numberStr, 16) : 
       parseInt(numberStr, 10);
     
+    // More efficient parsing
     const lines = content.split('\n');
     const title = lines[0].replace(/^#\s*/, '').trim();
     const description = lines[1]?.trim() || `NIP-${number} description`;
     
-    const statusMatch = content.match(/Status:\s*(draft|final|deprecated)/i);
+    // Optimize regex searches
+    const statusRegex = /Status:\s*(draft|final|deprecated)/i;
+    const kindRegex = /Kind:\s*(\d+)/i;
+    const tagRegex = /Tags:\s*([^\n]+)/gi;
+    
+    const statusMatch = content.match(statusRegex);
     const status = statusMatch ? statusMatch[1].toLowerCase() as "draft" | "final" | "deprecated" : "draft";
     
-    const kindMatch = content.match(/Kind:\s*(\d+)/i);
+    const kindMatch = content.match(kindRegex);
     const kind = kindMatch ? parseInt(kindMatch[1], 10) : undefined;
     
     const tags: string[] = [];
-    const tagMatches = content.matchAll(/Tags:\s*([^\n]+)/gi);
+    const tagMatches = content.matchAll(tagRegex);
     for (const match of tagMatches) {
       tags.push(...match[1].split(',').map((tag: string) => tag.trim()));
     }
@@ -283,16 +415,16 @@ async function fetchNipFile(file: GitHubFile): Promise<NipData | null> {
       content
     };
   } catch (error) {
-    console.error(`Error processing NIP ${file.name}:`, error);
+    console.error(`Error processing NIP ${file.name}`);
     return null;
   }
 }
 
-// Function to get NIPs with improved caching
+// Function to get NIPs with improved caching and parallel loading
 async function getNips(forceRefresh = false): Promise<NipData[]> {
   const now = Date.now();
   
-  // First attempt to load from memory cache
+  // First attempt to load from memory cache if it's fresh enough
   if (!forceRefresh && nipsCache.length > 0 && now - lastFetchTime < CACHE_TTL) {
     return nipsCache;
   }
@@ -305,7 +437,14 @@ async function getNips(forceRefresh = false): Promise<NipData[]> {
     }
   }
   
-  // Fetch fresh data if needed
+  // Avoid multiple parallel fetches
+  if (isLoading) {
+    console.error('NIPs already being fetched, using existing cache');
+    // Return current cache while waiting
+    return nipsCache.length > 0 ? nipsCache : [];
+  }
+  
+  // Fetch fresh data
   try {
     const nips = await fetchNipsFromGitHub();
     
@@ -322,10 +461,11 @@ async function getNips(forceRefresh = false): Promise<NipData[]> {
     return nipsCache;
   } catch (error) {
     console.error("Error refreshing NIPs:", error);
+    lastError = error instanceof Error ? error : new Error(String(error));
     
     // If we already have cached data, use it even if expired
     if (nipsCache.length > 0) {
-      console.warn("Using expired cache due to fetch error");
+      console.error("Using expired cache due to fetch error");
       return nipsCache;
     }
     
@@ -339,13 +479,16 @@ async function getNips(forceRefresh = false): Promise<NipData[]> {
   }
 }
 
-// Helper function to calculate relevance score using the search index
+// Helper function to calculate relevance score using the search index - optimized for performance
 function calculateRelevance(nip: NipData, searchTerms: string[]): { score: number; matchedTerms: string[] } {
   const matchedTerms: string[] = [];
   let score = 0;
   
   // Convert search terms to lowercase for case-insensitive matching
   const lowerSearchTerms = searchTerms.map(term => term.toLowerCase());
+  
+  // Use a map to avoid duplicate scoring and O(n²) searches
+  const termScores = new Map<string, number>();
   
   for (const term of lowerSearchTerms) {
     // Check for exact NIP number match (highest priority)
@@ -355,76 +498,84 @@ function calculateRelevance(nip: NipData, searchTerms: string[]): { score: numbe
       continue;
     }
     
+    let termMatched = false;
+    
     // Check title matches (high weight)
     if (searchIndex.titleIndex.has(term) && 
         searchIndex.titleIndex.get(term)?.has(nip.number)) {
       score += 3;
-      matchedTerms.push(term);
+      termMatched = true;
     }
     
     // Check description matches (medium weight)
     if (searchIndex.descriptionIndex.has(term) && 
         searchIndex.descriptionIndex.get(term)?.has(nip.number)) {
       score += 2;
-      if (!matchedTerms.includes(term)) {
-        matchedTerms.push(term);
-      }
+      termMatched = true;
     }
     
     // Check content matches (lower weight)
     if (searchIndex.contentIndex.has(term) && 
         searchIndex.contentIndex.get(term)?.has(nip.number)) {
       score += 1;
-      if (!matchedTerms.includes(term)) {
-        matchedTerms.push(term);
-      }
+      termMatched = true;
     }
     
     // Check kind match
     if (nip.kind !== undefined && nip.kind.toString() === term) {
       score += 4;
-      if (!matchedTerms.includes(term)) {
-        matchedTerms.push(term);
-      }
+      termMatched = true;
     }
     
     // Check tag matches
     if (nip.tags && nip.tags.some(tag => tag.toLowerCase() === term)) {
       score += 3;
-      if (!matchedTerms.includes(term)) {
-        matchedTerms.push(term);
-      }
+      termMatched = true;
     }
     
     // Partial matches in title (very important)
     if (nip.title.toLowerCase().includes(term)) {
       score += 2;
-      if (!matchedTerms.includes(term)) {
-        matchedTerms.push(term);
-      }
+      termMatched = true;
+    }
+    
+    if (termMatched && !matchedTerms.includes(term)) {
+      matchedTerms.push(term);
     }
   }
   
   return { score, matchedTerms };
 }
 
-// Improved search function
+// Get the current loading status
+export function getNipsLoadingStatus(): { loading: boolean; error: Error | null } {
+  return { 
+    loading: isLoading,
+    error: lastError
+  };
+}
+
+// Improved search function with performance optimizations
 export async function searchNips(query: string, limit: number = 10): Promise<NipSearchResult[]> {
+  console.error('Starting searchNips');
+  
   // Ensure we have NIPs data and the search index is built
   const nips = await getNips();
   
   if (nips.length === 0) {
     console.error("No NIPs available for search");
+    console.error('Completed searchNips with no results');
     return [];
   }
   
-  // Handle direct NIP number search as a special case
+  // Handle direct NIP number search as a special case (fastest path)
   const nipNumberMatch = query.match(/^(?:NIP-?)?(\d+)$/i);
   if (nipNumberMatch) {
     const nipNumber = parseInt(nipNumberMatch[1], 10);
     const directNip = nips.find(nip => nip.number === nipNumber);
     
     if (directNip) {
+      console.error('Completed searchNips with direct match');
       return [{
         nip: directNip,
         relevance: 100,
@@ -436,23 +587,90 @@ export async function searchNips(query: string, limit: number = 10): Promise<Nip
   // Split query into terms and filter out empty strings
   const searchTerms = query.split(/\s+/).filter(term => term.length > 0);
   
-  // Search through all NIPs
-  const results: NipSearchResult[] = nips.map(nip => {
-    const { score, matchedTerms } = calculateRelevance(nip, searchTerms);
-    return {
-      nip,
-      relevance: score,
-      matchedTerms
-    };
-  })
-  // Filter out results with no matches
-  .filter(result => result.relevance > 0)
-  // Sort by relevance (highest first)
-  .sort((a, b) => b.relevance - a.relevance)
-  // Limit results
-  .slice(0, limit);
+  // If the search terms are too short or common, warn about potential slow search
+  if (searchTerms.some(term => term.length < 3)) {
+    console.error('Search includes very short terms which may slow down the search');
+  }
   
-  return results;
+  // Search through all NIPs efficiently
+  const results: NipSearchResult[] = [];
+  
+  // Pre-filter NIPs that might be relevant based on fast checks
+  // This avoids scoring every NIP for performance
+  const potentialMatches = new Set<number>();
+  
+  // First do a quick scan to find potential matches
+  for (const term of searchTerms) {
+    const lowerTerm = term.toLowerCase();
+    
+    // Number match
+    if (searchIndex.numberIndex.has(lowerTerm)) {
+      potentialMatches.add(searchIndex.numberIndex.get(lowerTerm)!);
+    }
+    
+    // Title matches
+    const titleMatches = searchIndex.titleIndex.get(lowerTerm);
+    if (titleMatches) {
+      titleMatches.forEach(num => potentialMatches.add(num));
+    }
+    
+    // Description matches
+    const descMatches = searchIndex.descriptionIndex.get(lowerTerm);
+    if (descMatches) {
+      descMatches.forEach(num => potentialMatches.add(num));
+    }
+    
+    // Content matches only if we have few potential matches so far
+    if (potentialMatches.size < 50) {
+      const contentMatches = searchIndex.contentIndex.get(lowerTerm);
+      if (contentMatches) {
+        contentMatches.forEach(num => potentialMatches.add(num));
+      }
+    }
+    
+    // If we have too many potential matches, don't add more from content
+    if (potentialMatches.size > 100) {
+      break;
+    }
+  }
+  
+  // If no potential matches through indexing, do a linear scan
+  if (potentialMatches.size === 0) {
+    // Fallback: check titles directly
+    for (const nip of nips) {
+      for (const term of searchTerms) {
+        if (nip.title.toLowerCase().includes(term.toLowerCase())) {
+          potentialMatches.add(nip.number);
+          break;
+        }
+      }
+    }
+  }
+  
+  // Score only the potential matches
+  for (const nipNumber of potentialMatches) {
+    const nip = nips.find(n => n.number === nipNumber);
+    if (!nip) continue;
+    
+    const { score, matchedTerms } = calculateRelevance(nip, searchTerms);
+    
+    if (score > 0) {
+      results.push({
+        nip,
+        relevance: score,
+        matchedTerms
+      });
+    }
+  }
+  
+  // Sort by relevance and limit results
+  results.sort((a, b) => b.relevance - a.relevance);
+  const limitedResults = results.slice(0, limit);
+  
+  console.error('Completed searchNips');
+  console.error(`Search for "${query}" found ${results.length} results, returning top ${limitedResults.length}`);
+  
+  return limitedResults;
 }
 
 // Improved function to get a specific NIP by number
@@ -474,14 +692,44 @@ export async function getNipsByStatus(status: "draft" | "final" | "deprecated"):
   return nips.filter(nip => nip.status === status);
 }
 
-// Force a refresh of the NIPs cache
-export async function refreshNipsCache(): Promise<boolean> {
+// Force a refresh of the NIPs cache with status reporting
+export async function refreshNipsCache(): Promise<{success: boolean, message: string}> {
   try {
-    await getNips(true);
-    return true;
+    isLoading = true;
+    lastError = null;
+    
+    console.error('Forcing refresh of NIPs cache...');
+    const nips = await fetchNipsFromGitHub();
+    
+    if (nips.length > 0) {
+      nipsCache = nips;
+      lastFetchTime = Date.now();
+      
+      // Save to disk and rebuild index
+      saveCacheToDisk();
+      buildSearchIndex();
+      
+      return {
+        success: true,
+        message: `Successfully refreshed ${nips.length} NIPs`
+      };
+    } else {
+      return {
+        success: false,
+        message: 'Refresh completed but no NIPs were found'
+      };
+    }
   } catch (error) {
-    console.error("Error refreshing NIPs cache:", error);
-    return false;
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    console.error("Error refreshing NIPs cache:", errorMessage);
+    lastError = error instanceof Error ? error : new Error(errorMessage);
+    
+    return {
+      success: false,
+      message: `Failed to refresh NIPs: ${errorMessage}`
+    };
+  } finally {
+    isLoading = false;
   }
 }
 
@@ -514,14 +762,15 @@ export function formatNipResult(result: NipSearchResult, includeContent: boolean
   return lines.join("\n");
 }
 
-// Initialize by loading cache on module import
+// Initialize by loading cache on module import, with background fetch
 (async () => {
   // Try to load from disk first
-  if (!loadCacheFromDisk()) {
-    // If disk cache not available or expired, fetch in background
-    console.log('Fetching NIPs in background...');
-    getNips().catch(error => {
-      console.error('Error initializing NIPs cache:', error);
+  const loaded = loadCacheFromDisk();
+  
+  // Always trigger a background fetch to ensure fresh data
+  setTimeout(() => {
+    getNips(false).catch(error => {
+      console.error('Error initializing NIPs cache');
     });
-  }
+  }, loaded ? 5000 : 0); // If we loaded from cache, wait 5 seconds before refreshing
 })(); 
