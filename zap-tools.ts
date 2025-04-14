@@ -1,61 +1,21 @@
 import { z } from "zod";
 import { decode } from "light-bolt11-decoder";
 import * as nip19 from "nostr-tools/nip19";
-import { SimplePool } from "nostr-tools/pool";
 import fetch from "node-fetch";
 import crypto from "crypto";
 import { generateSecretKey, getPublicKey, finalizeEvent } from "nostr-tools/pure";
-
-// Set a reasonable timeout for queries
-export const QUERY_TIMEOUT = 8000;
-
-// Define default relays
-export const DEFAULT_RELAYS = [
-  "wss://relay.damus.io",
-  "wss://relay.nostr.band",
-  "wss://relay.primal.net",
-  "wss://nos.lol",
-  "wss://relay.current.fyi",
-  "wss://nostr.bitcoiner.social"
-];
-
-// Add more popular relays that we can try if the default ones fail
-export const FALLBACK_RELAYS = [
-  "wss://purplepag.es",
-  "wss://relay.snort.social",
-  "wss://nostr.wine",
-  "wss://relay.nostr.info",
-  "wss://relay.wellorder.net"
-];
-
-// Type definitions for Nostr
-export interface NostrEvent {
-  id: string;
-  pubkey: string;
-  created_at: number;
-  kind: number;
-  tags: string[][];
-  content: string;
-  sig: string;
-}
-
-export interface NostrFilter {
-  ids?: string[];
-  authors?: string[];
-  kinds?: number[];
-  since?: number;
-  until?: number;
-  limit?: number;
-  [key: `#${string}`]: string[];
-}
-
-// Define event kinds
-export const KINDS = {
-  Metadata: 0,
-  Text: 1,
-  ZapRequest: 9734,
-  ZapReceipt: 9735
-};
+import {
+  NostrEvent,
+  NostrFilter,
+  KINDS,
+  DEFAULT_RELAYS,
+  FALLBACK_RELAYS,
+  QUERY_TIMEOUT,
+  getFreshPool,
+  npubToHex,
+  hexToNpub,
+  formatPubkey
+} from "./utils/index.js";
 
 // Interface for LNURL response data
 export interface LnurlPayResponse {
@@ -205,138 +165,7 @@ export class ZapCache {
 // Create a global cache instance
 export const zapCache = new ZapCache();
 
-// Helper function to get a fresh pool for each request
-export function getFreshPool(): SimplePool {
-  return new SimplePool();
-}
-
-// Helper function to convert npub to hex
-export function npubToHex(pubkey: string): string | null {
-  if (!pubkey) return null;
-  
-  try {
-    // Clean up input
-    pubkey = pubkey.trim();
-    
-    // Check if the input is already a hex key (case insensitive check, but return lowercase)
-    if (/^[0-9a-fA-F]{64}$/i.test(pubkey)) {
-      return pubkey.toLowerCase();
-    }
-    
-    // Check if the input is an npub
-    if (pubkey.startsWith('npub1')) {
-      try {
-        const { type, data } = nip19.decode(pubkey);
-        if (type === 'npub') {
-          return data as string;
-        }
-      } catch (decodeError) {
-        console.error("Error decoding npub:", decodeError);
-        return null;
-      }
-    }
-    
-    // Not a valid pubkey format
-    return null;
-  } catch (error) {
-    console.error("Error converting npub to hex:", error);
-    return null;
-  }
-}
-
-// Helper function to convert hex to npub
-export function hexToNpub(hex: string): string | null {
-  if (!hex) return null;
-  
-  try {
-    // Clean up input
-    hex = hex.trim();
-    
-    // Check if the input is already an npub
-    if (hex.startsWith('npub1')) {
-      // Validate that it's a proper npub by trying to decode it
-      try {
-        const { type } = nip19.decode(hex);
-        if (type === 'npub') {
-          return hex;
-        }
-      } catch (e) {
-        // Not a valid npub
-        return null;
-      }
-    }
-    
-    // Check if the input is a valid hex key (case insensitive, but convert to lowercase)
-    if (/^[0-9a-fA-F]{64}$/i.test(hex)) {
-      try {
-        return nip19.npubEncode(hex.toLowerCase());
-      } catch (encodeError) {
-        console.error("Error encoding hex to npub:", encodeError);
-        return null;
-      }
-    }
-    
-    // Not a valid hex key
-    return null;
-  } catch (error) {
-    console.error("Error converting hex to npub:", error);
-    return null;
-  }
-}
-
-// Helper function to format public key for display
-export function formatPubkey(pubkey: string, useShortFormat = false): string {
-  if (!pubkey) return "Unknown";
-  
-  try {
-    // Clean up input
-    pubkey = pubkey.trim();
-    
-    // Get npub representation if we have a hex key
-    let npub: string | null = null;
-    
-    if (pubkey.startsWith('npub1')) {
-      // Validate that it's a proper npub
-      try {
-        const { type } = nip19.decode(pubkey);
-        if (type === 'npub') {
-          npub = pubkey;
-        }
-      } catch (e) {
-        // Not a valid npub, fall back to original
-        return pubkey;
-      }
-    } else if (/^[0-9a-fA-F]{64}$/i.test(pubkey)) {
-      // Convert hex to npub
-      npub = hexToNpub(pubkey);
-    }
-    
-    // If we couldn't get a valid npub, return the original
-    if (!npub) {
-      return pubkey;
-    }
-    
-    // Format according to preference
-    if (useShortFormat) {
-      // Short format: npub1abc...xyz
-      return `${npub.slice(0, 8)}...${npub.slice(-4)}`;
-    } else {
-      // Full format: npub1abc...xyz (hex)
-      const hex = npubToHex(npub);
-      if (hex) {
-        return `${npub} (${hex.slice(0, 6)}...${hex.slice(-6)})`;
-      } else {
-        return npub;
-      }
-    }
-  } catch (error) {
-    // Return original on error
-    console.error("Error formatting pubkey:", error);
-    return pubkey;
-  }
-}
-
-// Parse zap request data from description tag in zap receipt
+// Helper function to parse zap request data from description tag in zap receipt
 export function parseZapRequestData(zapReceipt: NostrEvent): ZapRequestData | undefined {
   try {
     // Find the description tag which contains the zap request JSON

@@ -4,22 +4,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import WebSocket from "ws";
-import { SimplePool } from "nostr-tools/pool";
-import * as nip19 from "nostr-tools/nip19";
 import { searchNips, formatNipResult } from "./nips-tools.js";
 import {
   NostrEvent,
   NostrFilter,
   KINDS,
-  ZapReceipt,
-  ZapCache,
-  zapCache,
   DEFAULT_RELAYS,
   QUERY_TIMEOUT,
   getFreshPool,
   npubToHex,
-  hexToNpub,
-  formatPubkey,
+  formatPubkey
+} from "./utils/index.js";
+import {
+  ZapReceipt,
+  ZapCache,
+  zapCache,
   formatZapReceipt,
   processZapReceipt,
   validateZapReceipt,
@@ -30,6 +29,13 @@ import {
   getSentZapsToolConfig,
   getAllZapsToolConfig
 } from "./zap-tools.js";
+import {
+  formatProfile,
+  formatNote,
+  getProfileToolConfig,
+  getKind1NotesToolConfig,
+  getLongFormNotesToolConfig
+} from "./note-tools.js";
 
 // Set WebSocket implementation for Node.js
 (globalThis as any).WebSocket = WebSocket;
@@ -40,53 +46,12 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
-// Helper function to format profile data
-function formatProfile(profile: NostrEvent): string {
-  if (!profile) return "No profile found";
-  
-  let metadata: any = {};
-  try {
-    metadata = profile.content ? JSON.parse(profile.content) : {};
-  } catch (e) {
-    console.error("Error parsing profile metadata:", e);
-  }
-  
-  return [
-    `Name: ${metadata.name || "Unknown"}`,
-    `Display Name: ${metadata.display_name || metadata.displayName || metadata.name || "Unknown"}`,
-    `About: ${metadata.about || "No about information"}`,
-    `NIP-05: ${metadata.nip05 || "Not set"}`,
-    `Lightning Address (LUD-16): ${metadata.lud16 || "Not set"}`,
-    `LNURL (LUD-06): ${metadata.lud06 || "Not set"}`,
-    `Picture: ${metadata.picture || "No picture"}`,
-    `Website: ${metadata.website || "No website"}`,
-    `Created At: ${new Date(profile.created_at * 1000).toISOString()}`,
-  ].join("\n");
-}
-
-// Helper function to format note content
-function formatNote(note: NostrEvent): string {
-  if (!note) return "";
-  
-  const created = new Date(note.created_at * 1000).toLocaleString();
-  
-  return [
-    `ID: ${note.id}`,
-    `Created: ${created}`,
-    `Content: ${note.content}`,
-    `---`,
-  ].join("\n");
-}
-
 // Register Nostr tools
 server.tool(
   "getProfile",
   "Get a Nostr profile by public key",
-  {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
-    relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
-  },
-  async ({ pubkey, relays }) => {
+  getProfileToolConfig,
+  async ({ pubkey, relays }, extra) => {
     // Convert npub to hex if needed
     const hexPubkey = npubToHex(pubkey);
     if (!hexPubkey) {
@@ -163,18 +128,14 @@ server.tool(
       // Clean up any subscriptions and close the pool
       pool.close(relaysToUse);
     }
-  },
+  }
 );
 
 server.tool(
   "getKind1Notes",
   "Get text notes (kind 1) by public key",
-  {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
-    limit: z.number().min(1).max(100).default(10).describe("Maximum number of notes to fetch"),
-    relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
-  },
-  async ({ pubkey, limit, relays }) => {
+  getKind1NotesToolConfig,
+  async ({ pubkey, limit, relays }, extra) => {
     // Convert npub to hex if needed
     const hexPubkey = npubToHex(pubkey);
     if (!hexPubkey) {
@@ -253,7 +214,7 @@ server.tool(
       // Clean up any subscriptions and close the pool
       pool.close(relaysToUse);
     }
-  },
+  }
 );
 
 server.tool(
@@ -829,12 +790,8 @@ server.tool(
 server.tool(
   "getLongFormNotes",
   "Get long-form notes (kind 30023) by public key",
-  {
-    pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
-    limit: z.number().min(1).max(100).default(10).describe("Maximum number of notes to fetch"),
-    relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
-  },
-  async ({ pubkey, limit, relays }) => {
+  getLongFormNotesToolConfig,
+  async ({ pubkey, limit, relays }, extra) => {
     // Convert npub to hex if needed
     const hexPubkey = npubToHex(pubkey);
     if (!hexPubkey) {
@@ -936,7 +893,7 @@ server.tool(
       // Clean up any subscriptions and close the pool
       pool.close(relaysToUse);
     }
-  },
+  }
 );
 
 server.tool(
