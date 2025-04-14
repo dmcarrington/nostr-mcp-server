@@ -547,14 +547,6 @@ function calculateRelevance(nip: NipData, searchTerms: string[]): { score: numbe
   return { score, matchedTerms };
 }
 
-// Get the current loading status
-export function getNipsLoadingStatus(): { loading: boolean; error: Error | null } {
-  return { 
-    loading: isLoading,
-    error: lastError
-  };
-}
-
 // Improved search function with performance optimizations
 export async function searchNips(query: string, limit: number = 10): Promise<NipSearchResult[]> {
   console.error('Starting searchNips');
@@ -672,73 +664,6 @@ export async function searchNips(query: string, limit: number = 10): Promise<Nip
   
   return limitedResults;
 }
-
-// Improved function to get a specific NIP by number
-export async function getNipByNumber(number: string | number): Promise<NipData | undefined> {
-  const nips = await getNips();
-  const nipNumber = typeof number === 'string' ? parseInt(number, 10) : number;
-  return nips.find(nip => nip.number === nipNumber);
-}
-
-// Improved function to get NIPs by kind
-export async function getNipsByKind(kind: number): Promise<NipData[]> {
-  const nips = await getNips();
-  return nips.filter(nip => nip.kind === kind);
-}
-
-// Improved function to get NIPs by status
-export async function getNipsByStatus(status: "draft" | "final" | "deprecated"): Promise<NipData[]> {
-  const nips = await getNips();
-  return nips.filter(nip => nip.status === status);
-}
-
-// Force a refresh of the NIPs cache with status reporting
-export async function refreshNipsCache(): Promise<{success: boolean, message: string}> {
-  try {
-    isLoading = true;
-    lastError = null;
-    
-    console.error('Forcing refresh of NIPs cache...');
-    const nips = await fetchNipsFromGitHub();
-    
-    if (nips.length > 0) {
-      nipsCache = nips;
-      lastFetchTime = Date.now();
-      
-      // Save to disk and rebuild index
-      saveCacheToDisk();
-      buildSearchIndex();
-      
-      return {
-        success: true,
-        message: `Successfully refreshed ${nips.length} NIPs`
-      };
-    } else {
-      return {
-        success: false,
-        message: 'Refresh completed but no NIPs were found'
-      };
-    }
-  } catch (error) {
-    const errorMessage = error instanceof Error ? error.message : String(error);
-    console.error("Error refreshing NIPs cache:", errorMessage);
-    lastError = error instanceof Error ? error : new Error(errorMessage);
-    
-    return {
-      success: false,
-      message: `Failed to refresh NIPs: ${errorMessage}`
-    };
-  } finally {
-    isLoading = false;
-  }
-}
-
-// Export schema for the search tool
-export const searchNipsSchema = z.object({
-  query: z.string().describe("Search query to find relevant NIPs"),
-  limit: z.number().min(1).max(50).default(10).describe("Maximum number of results to return"),
-  includeContent: z.boolean().default(false).describe("Whether to include the full content of each NIP in the results"),
-});
 
 // Format a NIP search result with cleaner output
 export function formatNipResult(result: NipSearchResult, includeContent: boolean = false): string {

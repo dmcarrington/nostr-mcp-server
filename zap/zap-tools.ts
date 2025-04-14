@@ -124,10 +124,6 @@ export class ZapCache {
     return cachedZap;
   }
   
-  has(id: string): boolean {
-    return this.get(id) !== undefined;
-  }
-  
   cleanup(): void {
     const now = Date.now();
     
@@ -149,14 +145,6 @@ export class ZapCache {
         this.cache.delete(id);
       }
     }
-  }
-  
-  clear(): void {
-    this.cache.clear();
-  }
-  
-  size(): number {
-    return this.cache.size;
   }
 }
 
