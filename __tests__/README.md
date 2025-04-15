@@ -4,25 +4,26 @@ This directory contains tests for the Nostr MCP server functionality.
 
 ## Overview
 
-The test suite uses Jest to test the core functionality of the Nostr MCP server. It covers:
+The test suite uses Jest to test both the core functionality and protocol integration of the Nostr MCP server. It includes:
 
-1. Profile and Notes operations (`profile-notes.test.ts`)
-2. Zap-related functionality (`zap-tools.test.ts`)
-3. NIPs search capabilities (`nips-search.test.ts`)
+1. Unit Tests - Testing isolated business logic
+2. Integration Tests - Testing with a real (but in-memory) Nostr relay
 
-## Test Structure
+## Test Files
 
-The tests are structured as follows:
+### Unit Tests
+- `basic.test.ts`: Simple tests for profile formatting and zap receipt processing
+- `profile-notes-simple.test.ts`: Tests for profile and note data structures
+- `zap-tools-simple.test.ts`: Tests for zap processing and anonymous zap preparation
+- `mocks.ts`: Contains mock data for unit tests
 
-- `__tests__/mocks.ts`: Contains mock data for tests
-- `__tests__/*.test.ts`: Test files for each component
-- `utils/test-helpers.js`: Extracted handler logic for profile and notes
-- `utils/zap-test-helpers.js`: Extracted handler logic for zap operations
-- `utils/nip-test-helpers.js`: Extracted handler logic for NIP searches
+### Integration Tests
+- `integration.test.ts`: Tests direct interaction with an ephemeral Nostr relay
+- `websocket-integration.test.ts`: Tests WebSocket communication with a Nostr relay
 
 ## Running Tests
 
-To run the tests, use:
+To run all tests:
 
 ```bash
 npm test
@@ -31,32 +32,50 @@ npm test
 To run a specific test file:
 
 ```bash
-npm test -- __tests__/profile-notes.test.ts
+npm test -- __tests__/basic.test.ts
+npm test -- __tests__/integration.test.ts
 ```
 
 ## Test Design
 
-The tests use mocks to simulate the Nostr network and focus on testing the business logic rather than actual network communication. This approach allows for:
+The tests use two approaches:
 
-1. Fast test execution
-2. Deterministic behavior
-3. Testing error handling and edge cases
+### Unit Tests
+Unit tests use mocks to simulate the Nostr network and focus on testing business logic without actual network communication. This approach allows for:
+- Fast test execution
+- Deterministic behavior
+- Testing error handling and edge cases
+
+### Integration Tests
+Integration tests use an in-memory ephemeral relay that implements the Nostr protocol, allowing:
+- Testing with real cryptographically signed events
+- Full event publication and retrieval workflows
+- Testing WebSocket protocol communication
+- Validating event verification works properly
 
 ## Test Coverage
 
-The test suite provides basic coverage for:
+The test suite provides coverage for:
 
-- Profile retrieval
-- Note retrieval
-- Zap receipt processing
+- Profile retrieval and formatting
+- Note retrieval and formatting
+- Zap receipt processing and validation
 - Anonymous zap preparation
-- NIPs search functionality
+- Full Nostr protocol event cycles
+- WebSocket communication
+- Event filtering
+- Subscription management
 
 ## Adding Tests
 
-When adding new features, consider adding tests that:
+When adding new features, consider adding:
 
-1. Test the happy path (successful operation)
-2. Test error handling
-3. Test edge cases
-4. Verify format of returned data 
+1. Unit tests that:
+   - Test the business logic in isolation
+   - Verify error handling
+   - Test edge cases
+
+2. Integration tests that:
+   - Verify the feature works with real Nostr events
+   - Test the WebSocket protocol behavior if applicable
+   - Verify end-to-end workflows 

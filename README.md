@@ -212,6 +212,7 @@ To modify or extend this server:
      - `conversion.ts`: Pubkey format conversion utilities
      - `formatting.ts`: Output formatting helpers
      - `pool.ts`: Nostr connection pool management
+     - `ephemeral-relay.ts`: In-memory Nostr relay for testing
 
 2. Run `npm run build` to compile
 
@@ -253,7 +254,9 @@ The test suite includes:
   - Closing subscriptions
   - Verifying that events with invalid signatures are rejected
 
-All integration tests use an in-memory ephemeral relay that implements the Nostr protocol, allowing for testing with real events and cryptographic verification without requiring external network connections.
+All integration tests use our `ephemeral-relay.ts` implementation—a fully functional in-memory Nostr relay that supports the Nostr protocol, allowing for real cryptographic event signing and verification without requiring external network connections. This provides a robust way to test the full Nostr workflow in an isolated environment.
+
+For more details about the test suite, see [__tests__/README.md](./__tests__/README.md).
 
 ## Codebase Organization
 
