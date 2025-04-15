@@ -219,7 +219,7 @@ To modify or extend this server:
 
 ## Testing
 
-We've implemented a simple test suite using Jest to test core functionality:
+We've implemented a comprehensive test suite using Jest to test both basic functionality and integration with the Nostr protocol:
 
 ```bash
 # Run all tests
@@ -227,15 +227,33 @@ npm test
 
 # Run a specific test file
 npm test -- __tests__/basic.test.ts
+
+# Run integration tests
+npm test -- __tests__/integration.test.ts
 ```
 
-The current tests focus on basic functionality without making any real network connections:
+The test suite includes:
 
+### Unit Tests
 - `basic.test.ts` - Tests simple profile formatting and zap receipt processing
 - `profile-notes-simple.test.ts` - Tests profile and note data structures
 - `zap-tools-simple.test.ts` - Tests zap processing and anonymous zap preparation
 
-All tests are intentionally simple and isolated, testing the business logic without relying on external services. This approach makes the tests fast, reliable, and suitable for continuous integration.
+### Integration Tests
+- `integration.test.ts` - Tests interaction with an ephemeral Nostr relay including:
+  - Publishing profile events
+  - Creating and retrieving text notes
+  - Publishing zap receipts
+  - Filtering events
+
+- `websocket-integration.test.ts` - Tests WebSocket communication with a Nostr relay:
+  - Publishing events over WebSocket
+  - Subscribing to events with filters
+  - Managing multiple subscriptions
+  - Closing subscriptions
+  - Verifying that events with invalid signatures are rejected
+
+All integration tests use an in-memory ephemeral relay that implements the Nostr protocol, allowing for testing with real events and cryptographic verification without requiring external network connections.
 
 ## Codebase Organization
 
