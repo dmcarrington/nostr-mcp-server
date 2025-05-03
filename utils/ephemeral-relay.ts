@@ -10,7 +10,7 @@ const HOST    = 'ws://localhost'
 const DEBUG   = process.env['DEBUG']   === 'true'
 const VERBOSE = process.env['VERBOSE'] === 'true' || DEBUG
 
-console.log('output mode:', DEBUG ? 'debug' : VERBOSE ? 'verbose' : 'silent')
+console.error('output mode:', DEBUG ? 'debug' : VERBOSE ? 'verbose' : 'silent')
 
 /* ================ [ Interfaces ] ================ */
 
