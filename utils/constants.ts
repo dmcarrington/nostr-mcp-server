@@ -3,6 +3,7 @@ export const QUERY_TIMEOUT = 8000;
 
 // Define default relays
 export const DEFAULT_RELAYS = [
+  "wss://nostr.everledger.io",
   "wss://relay.damus.io",
   "wss://relay.nostr.band",
   "wss://relay.primal.net",
@@ -26,5 +27,6 @@ export const KINDS = {
   Metadata: 0,
   Text: 1,
   ZapRequest: 9734,
-  ZapReceipt: 9735
+  ZapReceipt: 9735,
+  AppSpecificData: 30078
 }; 

@@ -31,6 +31,7 @@ import {
   formatNote,
   getProfileToolConfig,
   getKind1NotesToolConfig,
+  getKind3078NotesToolConfig,
   getLongFormNotesToolConfig
 } from "./note/note-tools.js";
 
@@ -165,6 +166,92 @@ server.tool(
         relaysToUse,
         {
           kinds: [KINDS.Text],
+          authors: [hexPubkey],
+          limit,
+        } as NostrFilter
+      );
+      
+      const notes = await Promise.race([notesPromise, timeoutPromise]) as NostrEvent[];
+      
+      if (!notes || notes.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `No notes found for ${displayPubkey}`,
+            },
+          ],
+        };
+      }
+      
+      // Sort notes by created_at in descending order (newest first)
+      notes.sort((a, b) => b.created_at - a.created_at);
+      
+      const formattedNotes = notes.map(formatNote).join("\n");
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Found ${notes.length} notes from ${displayPubkey}:\n\n${formattedNotes}`,
+          },
+        ],
+      };
+    } catch (error) {
+      console.error("Error fetching notes:", error);
+      
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Error fetching notes for ${displayPubkey}: ${error instanceof Error ? error.message : "Unknown error"}`,
+          },
+        ],
+      };
+    } finally {
+      // Clean up any subscriptions and close the pool
+      pool.close(relaysToUse);
+    }
+  }
+);
+
+server.tool(
+  "getKind30078Notes",
+  "Get AppSpecificData notes (kind 30078) by public key",
+  getKind3078NotesToolConfig,
+  async ({ pubkey, limit, relays }, extra) => {
+    // Convert npub to hex if needed
+    const hexPubkey = npubToHex(pubkey);
+    if (!hexPubkey) {
+      return {
+        content: [
+          {
+            type: "text",
+            text: "Invalid public key format. Please provide a valid hex pubkey or npub.",
+          },
+        ],
+      };
+    }
+    
+    // Generate a friendly display version of the pubkey
+    const displayPubkey = formatPubkey(hexPubkey);
+    
+    const relaysToUse = relays || DEFAULT_RELAYS;
+    // Create a fresh pool for this request
+    const pool = getFreshPool();
+    
+    try {
+      console.error(`Fetching kind 30078 notes for ${hexPubkey} from ${relaysToUse.join(", ")}`);
+      
+      // Use the querySync method with a timeout
+      const timeoutPromise = new Promise<never>((_, reject) => {
+        setTimeout(() => reject(new Error("Timeout")), QUERY_TIMEOUT);
+      });
+      
+      const notesPromise = pool.querySync(
+        relaysToUse,
+        {
+          kinds: [KINDS.AppSpecificData],
           authors: [hexPubkey],
           limit,
         } as NostrFilter
