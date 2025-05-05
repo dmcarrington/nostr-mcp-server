@@ -3,7 +3,6 @@ export const QUERY_TIMEOUT = 8000;
 
 // Define default relays
 export const DEFAULT_RELAYS = [
-  "wss://nostr.everledger.io",
   "wss://relay.damus.io",
   "wss://relay.nostr.band",
   "wss://relay.primal.net",

@@ -53,6 +53,26 @@ export async function getKind1Notes(pubkey: string, limit: number = 10, relays?:
 }
 
 /**
+ * Get Application Specific Data notes (kind 30078) by public key
+ */
+export async function getKind30078Notes(pubkey: string, limit: number = 10, relays?: string[]): Promise<NostrNote[]> {
+  const notes: NostrNote[] = [];
+  
+  for (let i = 0; i < limit; i++) {
+    notes.push({
+      id: `note${i}`,
+      pubkey,
+      content: `Test note ${i}`,
+      created_at: Math.floor(Date.now() / 1000) - (i * 3600),
+      kind: 30078,
+      tags: []
+    });
+  }
+  
+  return notes;
+}
+
+/**
  * Get long-form notes (kind 30023) by public key
  */
 export async function getLongFormNotes(pubkey: string, limit: number = 10, relays?: string[]): Promise<NostrNote[]> {

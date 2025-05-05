@@ -47,6 +47,24 @@ const getKind1Notes = (pubkey: string, limit: number): Promise<Note[]> => {
   return Promise.resolve(notes);
 };
 
+// Simple getKind30078Notes function for testing
+const getKind30078Notes = (pubkey: string, limit: number): Promise<Note[]> => {
+  const notes: Note[] = [];
+  
+  for (let i = 0; i < limit; i++) {
+    notes.push({
+      id: `note${i}`,
+      pubkey: pubkey,
+      kind: 30078,
+      content: `Test note ${i} content`,
+      created_at: Math.floor(Date.now() / 1000) - (i * 3600),
+      tags: []
+    });
+  }
+  
+  return Promise.resolve(notes);
+};
+
 // Simple getLongFormNotes function for testing
 const getLongFormNotes = (pubkey: string, limit: number): Promise<Note[]> => {
   const notes: Note[] = [];
@@ -88,6 +106,19 @@ describe('Profile and Notes Functions', () => {
     // Check the first note
     expect(notes[0].pubkey).toBe(testPubkey);
     expect(notes[0].kind).toBe(1);
+    expect(notes[0].content).toContain('Test note');
+  });
+
+  test('getKind30078Notes returns array of notes', async () => {
+    const limit = 5;
+    const notes: Note[] = await getKind30078Notes(testPubkey, limit);
+    
+    expect(notes).toBeInstanceOf(Array);
+    expect(notes.length).toBe(limit);
+    
+    // Check the first note
+    expect(notes[0].pubkey).toBe(testPubkey);
+    expect(notes[0].kind).toBe(30078);
     expect(notes[0].content).toContain('Test note');
   });
 

@@ -10,10 +10,11 @@ This server implements several tools for interacting with the Nostr network:
 
 1. `getProfile`: Fetches a user's profile information by public key
 2. `getKind1Notes`: Fetches text notes (kind 1) authored by a user
-3. `getLongFormNotes`: Fetches long-form content (kind 30023) authored by a user
-4. `getReceivedZaps`: Fetches zaps received by a user, including detailed payment information
-5. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
-6. `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
+3. `getKind30078Notes`: Fetches Application Specific Data (kind 30078) authored by a user
+4. `getLongFormNotes`: Fetches long-form content (kind 30023) authored by a user
+5. `getReceivedZaps`: Fetches zaps received by a user, including detailed payment information
+6. `getSentZaps`: Fetches zaps sent by a user, including detailed payment information
+   7 `getAllZaps`: Fetches both sent and received zaps for a user, clearly labeled with direction and totals
 7. `searchNips`: Search through Nostr Implementation Possibilities (NIPs) with relevance scoring
 8. `sendAnonymousZap`: Prepare an anonymous zap to a profile or event, generating a lightning invoice for payment
 
@@ -40,11 +41,13 @@ npm run build
 2. Configure Claude for Desktop by editing or creating the configuration file:
 
    For macOS:
+
    ```bash
    vim ~/Library/Application\ Support/Claude/claude_desktop_config.json
    ```
 
    For Windows:
+
    ```bash
    notepad %AppData%\Claude\claude_desktop_config.json
    ```
@@ -53,14 +56,12 @@ npm run build
 
    ```json
    {
-       "mcpServers": {
-           "nostr": {
-               "command": "node",
-               "args": [
-                   "/ABSOLUTE/PATH/TO/nostr-mcp-server/build/index.js"
-               ]
-           }
+     "mcpServers": {
+       "nostr": {
+         "command": "node",
+         "args": ["/ABSOLUTE/PATH/TO/nostr-mcp-server/build/index.js"]
        }
+     }
    }
    ```
 
@@ -75,11 +76,13 @@ npm run build
 2. Configure Cursor by creating or editing the configuration file:
 
    For macOS:
+
    ```bash
    vim ~/.cursor/config.json
    ```
 
    For Windows:
+
    ```bash
    notepad %USERPROFILE%\.cursor\config.json
    ```
@@ -88,14 +91,12 @@ npm run build
 
    ```json
    {
-       "mcpServers": {
-           "nostr": {
-               "command": "node",
-               "args": [
-                   "/ABSOLUTE/PATH/TO/nostr-mcp-server/build/index.js"
-               ]
-           }
+     "mcpServers": {
+       "nostr": {
+         "command": "node",
+         "args": ["/ABSOLUTE/PATH/TO/nostr-mcp-server/build/index.js"]
        }
+     }
    }
    ```
 
@@ -109,6 +110,7 @@ Once configured, you can ask Claude to use the Nostr tools by making requests li
 
 - "Show me the profile information for npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "What are the recent posts from npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8?"
+- "Show me recent posts from npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8 with kind 30078"
 - "Show me the long-form articles from npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 - "How many zaps has npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8 received?"
 - "Show me the zaps sent by npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
@@ -175,6 +177,7 @@ The `sendAnonymousZap` tool lets users send zaps without revealing their Nostr i
 - The server generates a lightning invoice for payment that you can copy into your Lightning wallet
 
 Examples:
+
 ```
 "Send an anonymous zap of 100 sats to npub1qny3tkh0acurzla8x3zy4nhrjz5zd8ne6dvrjehx9n9hr3lnj08qwuzwc8"
 "Send 1000 sats anonymously to note1abcdef... with the comment 'Great post!'"
@@ -191,6 +194,7 @@ The server fully validates LNURL services according to LNURL-pay (LUD-06) and Li
 ## Default Relays
 
 The server uses the following relays by default:
+
 - wss://relay.damus.io
 - wss://relay.nostr.band
 - wss://relay.primal.net
@@ -203,6 +207,7 @@ The server uses the following relays by default:
 To modify or extend this server:
 
 1. Edit the relevant file:
+
    - `index.ts`: Main server and tool registration
    - `note/note-tools.ts`: Profile and notes functionality ([Documentation](./note/README.md))
    - `zap/zap-tools.ts`: Zap-related functionality ([Documentation](./zap/README.md))
@@ -236,12 +241,15 @@ npm test -- __tests__/integration.test.ts
 The test suite includes:
 
 ### Unit Tests
+
 - `basic.test.ts` - Tests simple profile formatting and zap receipt processing
 - `profile-notes-simple.test.ts` - Tests profile and note data structures
 - `zap-tools-simple.test.ts` - Tests zap processing and anonymous zap preparation
 
 ### Integration Tests
+
 - `integration.test.ts` - Tests interaction with an ephemeral Nostr relay including:
+
   - Publishing profile events
   - Creating and retrieving text notes
   - Publishing zap receipts
@@ -256,11 +264,12 @@ The test suite includes:
 
 All integration tests use our `ephemeral-relay.ts` implementation—a fully functional in-memory Nostr relay that supports the Nostr protocol, allowing for real cryptographic event signing and verification without requiring external network connections. This provides a robust way to test the full Nostr workflow in an isolated environment.
 
-For more details about the test suite, see [__tests__/README.md](./__tests__/README.md).
+For more details about the test suite, see [**tests**/README.md](./__tests__/README.md).
 
 ## Codebase Organization
 
 The codebase is organized into modules:
+
 - Core server setup in `index.ts`
 - Specialized functionality in dedicated directories:
   - [`nips/`](./nips/README.md): NIPs search and caching functionality
