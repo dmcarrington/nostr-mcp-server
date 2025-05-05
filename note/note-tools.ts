@@ -16,6 +16,13 @@ export const getKind1NotesToolConfig = {
   relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
 };
 
+// Schema for getKind3078Notes tool
+export const getKind3078NotesToolConfig = {
+  pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),
+  limit: z.number().min(1).max(100).default(10).describe("Maximum number of notes to fetch"),
+  relays: z.array(z.string()).optional().describe("Optional list of relays to query"),
+};
+
 // Schema for getLongFormNotes tool
 export const getLongFormNotesToolConfig = {
   pubkey: z.string().describe("Public key of the Nostr user (hex format or npub format)"),

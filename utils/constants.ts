@@ -26,5 +26,6 @@ export const KINDS = {
   Metadata: 0,
   Text: 1,
   ZapRequest: 9734,
-  ZapReceipt: 9735
+  ZapReceipt: 9735,
+  AppSpecificData: 30078
 }; 
